@@ -12,6 +12,8 @@ diajak bicara lewat Telegram, terminal, atau aplikasi chat.
 ![KernelSU](https://img.shields.io/badge/KernelSU-module-success)
 ![Void Linux](https://img.shields.io/badge/rootfs-Void%20Linux%20glibc-478061)
 ![offline WebUI](https://img.shields.io/badge/WebUI-offline-blueviolet)
+[![release](https://img.shields.io/github/v/release/rjial/agentbox?include_prereleases)](https://github.com/rjial/agentbox/releases)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
 
@@ -123,7 +125,11 @@ Proyek ini dirancang dengan asumsi bahwa agen AI menjalankan kode, dan HP Anda b
 
 ## Instalasi
 
-1. **Build zip module** (bisa langsung di HP lewat Termux, atau di PC):
+1. **Unduh zip module** dari [Releases](https://github.com/rjial/agentbox/releases): pilih
+   `agentbox-vX.Y.Z-release.zip` (atau `-debug.zip` untuk log diagnosis lengkap). Cek integritasnya dengan
+   `SHA256SUMS` di rilis yang sama.
+
+   Atau build sendiri (bisa langsung di HP lewat Termux, atau di PC):
    ```sh
    git clone https://github.com/rjial/agentbox.git
    cd agentbox
@@ -168,6 +174,21 @@ sh tools/build.sh debug     # zip dengan log debug: logs/debug.log, trace setup,
   Preact + htm pada halaman Konfigurasi).
 - Catatan arsitektur, keputusan desain, dan hasil verifikasi lengkap ada di [`CLAUDE.md`](CLAUDE.md).
 
+### Versi dan rilis
+
+agentbox memakai [Semantic Versioning](https://semver.org). Versi hanya ditulis di `module.prop`
+(`version=vMAJOR.MINOR.PATCH`, dengan `versionCode = MAJOR×10000 + MINOR×100 + PATCH` agar KernelSU selalu
+mengenali versi yang lebih baru). Naikkan dengan:
+
+```sh
+sh tools/bump-version.sh patch     # atau minor | major | 1.2.0 | 1.3.0-rc.1
+git commit -am "Rilis v0.1.1" && git push
+```
+
+Setiap push ke `main` yang mengubah versi menjalankan [GitHub Actions](.github/workflows/release.yml): lint
+(shellcheck), validasi versi, build zip release + debug, lalu membuat **GitHub Release** `vX.Y.Z` lengkap dengan
+`SHA256SUMS` dan catatan rilis otomatis. Versi pre-release (mis. `-rc.1`) ditandai sebagai *prerelease*.
+
 ## Status
 
 agentbox dipakai dan diuji di satu perangkat (arm64, KernelSU-Next). Beberapa bagian masih berstatus
@@ -190,4 +211,8 @@ Laporan bug dan pull request sangat diterima.
   Lisensi library yang dibundel ada di `webroot/vendor/`.
 - [hermes-android](https://github.com/rusty4444/hermes-android) oleh rusty4444.
 
-Dibuat oleh **Rizal Abdul Basith**.
+## Lisensi
+
+[MIT](LICENSE) © 2026 Rizal Abdul Basith. Library pihak ketiga di `webroot/vendor/` memakai lisensinya masing-masing
+(xterm.js MIT, Preact MIT, htm Apache-2.0). Claude Code dan Hermes Agent tidak termasuk dalam repo ini dan tunduk
+pada lisensi/ketentuan pembuatnya.

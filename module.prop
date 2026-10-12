@@ -1,6 +1,6 @@
 id=agentbox
 name=agentbox
 version=v0.1.0
-versionCode=1
+versionCode=100
 author=Rizal Abdul Basith <rizalgu4rd14n@gmail.com>
 description=Claude Code + Hermes Agent di chroot Void Linux (aarch64, glibc). Setelah flash: su -c 'agentbox setup'

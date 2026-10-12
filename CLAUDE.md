@@ -37,8 +37,12 @@ agentbox/
 │   └── gateway.sh        # SUDAH ADA: supervisor + start/stop/restart/status/log/autostart gateway
 ├── rootfs-setup/
 │   └── setup.sh          # dijalankan DI DALAM chroot saat `agentbox setup`
-├── tools/
-│   └── build.sh          # build zip release/debug ke dist/ (tidak ikut masuk zip)
+├── tools/                # tidak ikut masuk zip
+│   ├── build.sh          # build zip release/debug ke dist/
+│   └── bump-version.sh   # semver di module.prop; --check dipakai CI
+├── .github/workflows/
+│   └── release.yml       # versi berubah di main → lint, build, GitHub Release vX.Y.Z
+├── README.md / LICENSE   # README untuk pengguna; lisensi MIT
 └── webroot/              # WebUI KernelSU, navigasi bawah: Status · Gateway · Terminal · Konfigurasi
     ├── index.html        # Status (halaman pembuka): komponen terpasang/belum, versi, sistem
     ├── gateway.html      # kontrol gateway (dulu index.html)
@@ -406,6 +410,16 @@ WebUI tanpa Termux. Masih prototipe; menyimpang dari aturan "satu file" karena x
 - Override saat runtime tanpa build ulang: `su -c 'AGENTBOX_DEBUG=1 agentbox setup ...'` (atau `=0`).
 - `debug.log` ber-permission `600`, dirotasi ke `debug.log.1` saat > 5 MB.
 - Jangan pernah mengoper nilai dari `config/env` ke `ab_debug` (hanya nama variabel).
+
+## Versi dan rilis
+
+- **Semver**, sumber tunggal `module.prop`: `version=vMAJOR.MINOR.PATCH[-PRE]`,
+  `versionCode=MAJOR*10000+MINOR*100+PATCH` (MINOR/PATCH < 100; pre-release memakai versionCode versi dasarnya).
+  Jangan edit manual: `sh tools/bump-version.sh patch|minor|major|X.Y.Z[-pre]`.
+- `.github/workflows/release.yml`: push ke `main` yang mengubah `module.prop` (atau dijalankan manual) →
+  `bump-version.sh --check` → lewati bila tag sudah ada → shellcheck 0.10.0 (dipatok, sama dengan pengembangan)
+  → `build.sh release` + `debug` + `SHA256SUMS` → `gh release create vX.Y.Z --generate-notes` (pre-release
+  ditandai). Nilai dari `module.prop` dioper lewat `env:`, bukan `${{ }}` di skrip. Divalidasi dengan actionlint.
 
 ## Testing
 

@@ -1,0 +1,76 @@
+# Rilis otomatis: setiap push ke main yang mengubah versi di module.prop membuat GitHub Release
+# vX.Y.Z berisi zip module (release + debug) dan SHA256SUMS. Versi yang tag-nya sudah ada dilewati.
+# Aturan versi (semver + versionCode) ada di tools/bump-version.sh; naikkan versi dengan skrip itu.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [module.prop]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Baca dan validasi versi
+        id: ver
+        run: sh tools/bump-version.sh --check | tee -a "$GITHUB_OUTPUT"
+
+      - name: Lewati bila tag sudah ada
+        id: tag
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag $TAG sudah ada, rilis dilewati. Naikkan versi dengan tools/bump-version.sh."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Versi shellcheck dipatok sama dengan yang dipakai saat pengembangan agar hasil lint konsisten.
+      - name: Pasang shellcheck 0.10.0
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          curl -fsSL -o /tmp/sc.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          tar -xJf /tmp/sc.tar.xz -C /tmp
+          sudo install -m 755 /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Lint
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          shellcheck -x -s sh customize.sh post-fs-data.sh service.sh uninstall.sh \
+            lib/*.sh system/bin/* tools/*.sh
+          shellcheck -s bash rootfs-setup/setup.sh
+
+      - name: Build zip
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          sh tools/build.sh release
+          sh tools/build.sh debug
+          cd dist && sha256sum ./*.zip > SHA256SUMS && cat SHA256SUMS
+
+      - name: Buat GitHub Release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -- --target "$GITHUB_SHA" --title "agentbox $TAG" --generate-notes
+          if [ "$PRERELEASE" = true ]; then set -- "$@" --prerelease; fi
+          gh release create "$TAG" dist/*.zip dist/SHA256SUMS "$@"
