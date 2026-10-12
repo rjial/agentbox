@@ -420,6 +420,12 @@ WebUI tanpa Termux. Masih prototipe; menyimpang dari aturan "satu file" karena x
   `bump-version.sh --check` → lewati bila tag sudah ada → shellcheck 0.10.0 (dipatok, sama dengan pengembangan)
   → `build.sh release` + `debug` + `SHA256SUMS` → `gh release create vX.Y.Z --generate-notes` (pre-release
   ditandai). Nilai dari `module.prop` dioper lewat `env:`, bukan `${{ }}` di skrip. Divalidasi dengan actionlint.
+- **Update dari KernelSU Manager**: `module.prop` punya
+  `updateJson=https://github.com/rjial/agentbox/releases/latest/download/update.json` (`latest` = rilis stabil
+  terbaru, bukan pre-release). Workflow membuat `update.json` (`version`, `versionCode`, `zipUrl` ke
+  `agentbox-vX.Y.Z-release.zip`, `changelog`) dengan `jq` dan `changelog.md` (commit sejak tag sebelumnya),
+  hanya untuk rilis stabil. Nama zip di `zipUrl` harus sama dengan keluaran `tools/build.sh release`.
+  Zip debug juga membawa `updateJson`, jadi update dari Manager mengganti build debug dengan build release.
 
 ## Testing
 

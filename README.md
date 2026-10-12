@@ -189,6 +189,13 @@ Setiap push ke `main` yang mengubah versi menjalankan [GitHub Actions](.github/w
 (shellcheck), validasi versi, build zip release + debug, lalu membuat **GitHub Release** `vX.Y.Z` lengkap dengan
 `SHA256SUMS` dan catatan rilis otomatis. Versi pre-release (mis. `-rc.1`) ditandai sebagai *prerelease*.
 
+### Update dari KernelSU Manager
+
+`module.prop` berisi `updateJson`, sehingga KernelSU Manager memeriksa sendiri rilis stabil terbaru dan
+menawarkan update lengkap dengan changelog-nya. Setiap rilis stabil menyertakan `update.json` dan `changelog.md`;
+pre-release tidak ditawarkan sebagai update. Rootfs, konfigurasi, dan data di `/data/adb/agentbox` tidak
+tersentuh saat module diperbarui.
+
 ## Status
 
 agentbox dipakai dan diuji di satu perangkat (arm64, KernelSU-Next). Beberapa bagian masih berstatus

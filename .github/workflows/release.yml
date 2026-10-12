@@ -64,6 +64,32 @@ jobs:
           sh tools/build.sh debug
           cd dist && sha256sum ./*.zip > SHA256SUMS && cat SHA256SUMS
 
+      # update.json untuk fitur update KernelSU Manager (updateJson di module.prop menunjuk ke
+      # releases/latest/download/update.json, yang hanya mengikuti rilis stabil). changelog.md = commit sejak
+      # tag sebelumnya, ditampilkan Manager saat menawarkan update. Tidak dibuat untuk pre-release.
+      - name: Siapkan update.json dan changelog
+        if: steps.tag.outputs.exists == 'false' && steps.ver.outputs.prerelease == 'false'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION_CODE: ${{ steps.ver.outputs.versionCode }}
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)
+          {
+            echo "## agentbox $TAG"
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty='- %s' "$prev..$GITHUB_SHA"
+            else
+              git log --no-merges --pretty='- %s' "$GITHUB_SHA"
+            fi
+          } > dist/changelog.md
+          jq -n --arg version "$TAG" --argjson versionCode "$VERSION_CODE" \
+            --arg zipUrl "$base/agentbox-$TAG-release.zip" --arg changelog "$base/changelog.md" \
+            '{version: $version, versionCode: $versionCode, zipUrl: $zipUrl, changelog: $changelog}' \
+            > dist/update.json
+          cat dist/update.json dist/changelog.md
+
       - name: Buat GitHub Release
         if: steps.tag.outputs.exists == 'false'
         env:
@@ -73,4 +99,6 @@ jobs:
         run: |
           set -- --target "$GITHUB_SHA" --title "agentbox $TAG" --generate-notes
           if [ "$PRERELEASE" = true ]; then set -- "$@" --prerelease; fi
-          gh release create "$TAG" dist/*.zip dist/SHA256SUMS "$@"
+          set -- "$TAG" dist/*.zip dist/SHA256SUMS "$@"
+          if [ -f dist/update.json ]; then set -- "$@" dist/update.json dist/changelog.md; fi
+          gh release create "$@"
