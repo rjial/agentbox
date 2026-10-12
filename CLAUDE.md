@@ -42,7 +42,8 @@ agentbox/
 │   └── bump-version.sh   # semver di module.prop; --check dipakai CI
 ├── .github/workflows/
 │   └── release.yml       # versi berubah di main → lint, build, GitHub Release vX.Y.Z
-├── README.md / LICENSE   # README untuk pengguna; lisensi MIT
+├── README.md             # README utama (Inggris); README.id.md versi Indonesia
+├── LICENSE               # MIT
 └── webroot/              # WebUI KernelSU, navigasi bawah: Status · Gateway · Terminal · Konfigurasi
     ├── index.html        # Status (halaman pembuka): komponen terpasang/belum, versi, sistem
     ├── gateway.html      # kontrol gateway (dulu index.html)
