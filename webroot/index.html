@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>agentbox · Status</title>
+<link rel="stylesheet" href="app.css">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: max(16px, env(safe-area-inset-top)) 16px 16px;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Roboto", sans-serif;
+  }
+  a { color: var(--accent); }
+  .refresh { background: none; border: 0; color: var(--accent); font: 600 14px system-ui, sans-serif; padding: 6px 0; cursor: pointer; }
+</style>
+</head>
+<body data-page="status">
+<main class="page">
+  <div class="page-head">
+    <h1>agentbox</h1>
+    <span class="badge" id="build">…</span>
+  </div>
+
+  <!-- Ringkasan: siap / setup belum lengkap, beserta langkah berikutnya -->
+  <section class="card hero" id="hero" aria-live="polite">
+    <p class="hero-word" id="hero-word">Memeriksa…</p>
+    <p class="hero-detail" id="hero-detail"></p>
+    <div class="btn-row" id="hero-actions"></div>
+  </section>
+
+  <section class="card">
+    <h2>Komponen</h2>
+    <ul class="items" id="components"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Gateway</h2>
+    <ul class="items" id="gateway"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Sistem</h2>
+    <ul class="items" id="system"></ul>
+  </section>
+
+  <button class="refresh" id="refresh">Muat ulang</button>
+</main>
+
+<script src="app.js"></script>
+<script>
+(() => {
+  "use strict";
+  const { cliJson, esc } = window.AB;
+  const $ = (id) => document.getElementById(id);
+
+  // Urutan = alur setup. tty: profil Terminal yang menyelesaikan komponen itu.
+  const COMPONENTS = [
+    { id: "rootfs", name: "Rootfs Void Linux", sub: "Sistem Linux (glibc) untuk Claude & Hermes", tty: "setup" },
+    { id: "base", name: "Paket dasar", sub: "nodejs, python3, git, curl, build tools", tty: "setup" },
+    { id: "locale", name: "Locale", sub: "en_US.UTF-8", tty: "setup" },
+    { id: "user", name: "User agent", sub: "Akun non-root tanpa sudo", tty: "setup" },
+    { id: "claude", name: "Claude Code", sub: "", tty: "setup" },
+    { id: "uv", name: "uv", sub: "Pengelola paket Python", tty: "setup" },
+    { id: "hermes", name: "Hermes Agent", sub: "", tty: "hermes-install" },
+    { id: "gateway", name: "Gateway Hermes", sub: "Telegram dsb.", tty: "gateway-setup" },
+  ];
+  const ttyLink = (profile, text, primary) =>
+    `<a class="btn${primary ? " primary" : ""}" href="tty.html#profile=${encodeURIComponent(profile)}">${esc(text)}</a>`;
+  const chip = (cls, text) => `<span class="chip ${cls}">${esc(text)}</span>`;
+  const item = (name, sub, right) =>
+    `<li><div class="txt"><p class="name">${esc(name)}</p>${sub ? `<p class="sub">${sub}</p>` : ""}</div>${right}</li>`;
+
+  let last = null;          // JSON status terakhir
+  let versions = null;      // {claude, hermes} dari --versions
+
+  function render(s) {
+    $("build").textContent = s.build + (s.debug ? " · log debug" : "");
+    $("build").classList.toggle("warn", !!s.debug);
+
+    // ---- komponen
+    const comp = s.components || {};
+    $("components").innerHTML = COMPONENTS.map((c) => {
+      let sub = esc(c.sub);
+      if (c.id === "claude" || c.id === "hermes") {
+        const v = versions && versions[c.id];
+        sub = v ? `<code>${esc(v)}</code>` : (s[c.id] && s[c.id].installed && !versions ? "memuat versi…" : "");
+      }
+      if (c.id === "user" && s.agent && s.agent.exists) sub = esc(`uid ${s.agent.uid}${s.agent.uid !== s.agent.expected_uid ? " (seharusnya " + s.agent.expected_uid + ")" : ""}, tanpa sudo`);
+      return item(c.name, sub, comp[c.id] ? chip("ok", "terpasang") : chip("todo", "belum"));
+    }).join("");
+
+    // ---- langkah berikutnya
+    const pending = COMPONENTS.filter((c) => !comp[c.id]);
+    const hero = $("hero");
+    let word, detail, actions = "";
+    if (!s.rootfs) {
+      hero.dataset.tone = "todo";
+      word = "Belum disiapkan";
+      detail = "Rootfs belum ada. Setup mengunduh Void Linux lalu memasang Claude Code dan Hermes.";
+      actions = ttyLink("setup", "Mulai setup di Terminal", true);
+    } else if (pending.length) {
+      const next = pending[0];
+      hero.dataset.tone = "todo";
+      word = "Setup belum lengkap";
+      detail = `Belum: ${pending.map((c) => c.name).join(", ")}.`;
+      actions = ttyLink(next.tty, `Lanjutkan: ${next.name}`, true);
+    } else if (s.hermes && s.hermes.installed && !s.hermes.model_set) {
+      hero.dataset.tone = "todo";
+      word = "Model Hermes belum diatur";
+      detail = "Pilih provider dan model untuk Hermes.";
+      actions = ttyLink("hermes-setup", "Atur di Terminal (hermes setup)", true);
+    } else {
+      hero.dataset.tone = "ok";
+      word = "Siap digunakan";
+      const g = s.gateway || {};
+      detail = g.state === "running" ? "Semua komponen terpasang, gateway berjalan." : "Semua komponen terpasang. Gateway sedang berhenti.";
+    }
+    $("hero-word").textContent = word;
+    $("hero-detail").textContent = detail;
+    $("hero-actions").innerHTML = actions;
+
+    // ---- gateway
+    const g = s.gateway || {};
+    const st = { running: chip("ok", "berjalan"), restarting: chip("todo", "restart"), stopped: chip("", "berhenti") }[g.state] || chip("", "?");
+    $("gateway").innerHTML =
+      item("Status", g.state === "running" ? esc(`PID ${g.pid}, aktif ${fmtUptime(g.uptime)}`) : "", st) +
+      item("Dikonfigurasi", "", g.configured ? chip("ok", "ya") : chip("todo", "belum")) +
+      item("Jalan saat HP menyala", "", g.autostart ? chip("ok", "aktif") : chip("", "mati")) +
+      apiRow((s.hermes || {}).api_server) +
+      `<li><a class="btn" href="gateway.html">Buka halaman Gateway</a></li>`;
+
+    // ---- sistem
+    const free = s.disk_free_mb;
+    const auth = { env: chip("ok", "API key"), token: chip("ok", "token OAuth"), oauth: chip("ok", "login"), wrong: chip("err", "token salah tempat"), none: chip("todo", "belum") }[s.claude && s.claude.auth] || chip("", "?");
+    $("system").innerHTML =
+      item("Arsitektur", "", `<span class="val">${esc(s.arch)}</span>`) +
+      item("Ruang /data", free != null && free < 3072 ? "Setup lengkap butuh sekitar 3 GB" : "",
+        free == null ? chip("", "?") : (free < 3072 ? chip("todo", fmtMb(free)) : `<span class="val">${esc(fmtMb(free))}</span>`)) +
+      item("Mount chroot", "Di sesi WebUI ini", `<span class="val">${esc(s.mounts)} aktif</span>`) +
+      item("Autentikasi Claude Code",
+        s.claude && s.claude.auth === "none" ? `<a href="tty.html#profile=claude-login">Login di Terminal</a>, atau isi kunci di <a href="config.html">Konfigurasi</a>`
+          : s.claude && s.claude.auth === "wrong" ? `Token OAuth tersimpan sebagai ANTHROPIC_API_KEY. Perbaiki di <a href="config.html">Konfigurasi</a>.` : "",
+        auth);
+  }
+
+  // API Server Hermes untuk aplikasi klien (hermes-android); diatur di halaman Konfigurasi.
+  function apiRow(a) {
+    if (!a) return "";
+    const st = !a.enabled ? chip("", "nonaktif") : a.listening ? chip("ok", "aktif") : chip("todo", "aktif, belum mendengar");
+    return item("API untuk aplikasi", esc(`${a.host}:${a.port}`) + ` · <a href="config.html">atur</a>`, st);
+  }
+
+  function fmtMb(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB"; }
+  function fmtUptime(sec) {
+    sec = Number(sec) || 0;
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return h ? `${h} j ${m} m` : m ? `${m} m` : `${sec} d`;
+  }
+
+  let loading = false;
+  async function load(withVersions) {
+    if (loading) return;
+    loading = true;
+    const s = await cliJson("status --json");
+    if (!s) {
+      $("hero").dataset.tone = "err";
+      $("hero-word").textContent = "Tidak bisa membaca status";
+      $("hero-detail").textContent = "Buka halaman ini dari KernelSU Manager (module agentbox).";
+      loading = false;
+      return;
+    }
+    last = s;
+    render(s);
+    loading = false;
+    // Versi lambat (hermes ~5 detik): dimuat terpisah setelah halaman tampil.
+    if (withVersions) {
+      const v = await cliJson("status --json --versions");
+      versions = v ? { claude: v.claude && v.claude.version, hermes: v.hermes && v.hermes.version } : {};
+      render(v || last);
+    }
+  }
+
+  $("refresh").addEventListener("click", () => load(true));
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(false); });
+  load(true);
+})();
+</script>
+</body>
+</html>

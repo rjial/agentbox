@@ -1,0 +1,14 @@
+#!/system/bin/sh
+# Wrapper: jalankan hermes di chroot Void sebagai user agent (bukan root).
+# Dipanggil dari user non-root (mis. Termux) -> naik ke root lewat su, lalu turun ke agent.
+if [ "$(id -u)" != 0 ]; then
+	q="'$0'"
+	for a in "$@"; do
+		q="$q '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+	done
+	exec su -c "cd '$(pwd | sed "s/'/'\\\\''/g")' 2>/dev/null; exec $q"
+fi
+MODDIR=/data/adb/modules/agentbox
+# shellcheck source-path=SCRIPTDIR source=../../lib/common.sh
+. "$MODDIR/lib/common.sh"
+ab_wrapper hermes "$@"

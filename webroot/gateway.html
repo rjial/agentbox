@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>agentbox · Gateway</title>
+<link rel="stylesheet" href="app.css">
+<style>
+  :root {
+    --paper: #eef1f4;
+    --surface: #ffffff;
+    --ink: #1d2733;
+    --muted: #5b6673;
+    --line: #cbd3dc;
+    --accent: #2f5d8a;
+    --run: #1e7f5c;
+    --wait: #a86a12;
+    --stop: #6b7480;
+    --err: #b23b3b;
+    --state: var(--stop);
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #151b22;
+      --surface: #1d252f;
+      --ink: #e4e9ef;
+      --muted: #97a2ae;
+      --line: #334050;
+      --accent: #7fa8d1;
+      --run: #4cc29a;
+      --wait: #e0a646;
+      --stop: #8a95a2;
+      --err: #e07b7b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Roboto", sans-serif;
+  }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 15px; font-weight: 600; color: var(--muted); margin: 0 0 12px; }
+
+  /* Elemen utama: status gateway */
+  .status {
+    border-left: 8px solid var(--state);
+    background: var(--surface);
+    border-radius: 4px 14px 14px 4px;
+    padding: 20px 20px 18px;
+    transition: border-color .3s ease;
+  }
+  .status[data-state="running"] { --state: var(--run); }
+  .status[data-state="restarting"] { --state: var(--wait); }
+  .status[data-state="stopped"] { --state: var(--stop); }
+  .status[data-state="error"] { --state: var(--err); }
+  .status-name { font-size: 15px; color: var(--muted); margin: 0; }
+  .status-word {
+    font-size: 40px; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em;
+    color: var(--state); margin: 2px 0 6px;
+    transition: color .3s ease;
+  }
+  .status-detail { margin: 0; color: var(--muted); font-size: 14px; min-height: 21px; }
+
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+  button {
+    font: inherit; font-weight: 600; border-radius: 10px; padding: 12px 16px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    cursor: pointer; min-height: 48px;
+  }
+  button.primary { flex: 1; background: var(--accent); border-color: var(--accent); color: var(--paper); }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible, input:focus-visible + .track { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  .notice {
+    margin-top: 12px; padding: 12px 14px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--err); color: var(--ink); font-size: 14px;
+  }
+  .notice code { font-size: 13px; }
+  .notice[hidden] { display: none; }
+
+  .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    margin-top: 16px; padding: 14px 16px; background: var(--surface); border-radius: 12px;
+  }
+  .row p { margin: 0; }
+  .row .hint { color: var(--muted); font-size: 14px; }
+
+  /* Switch */
+  .switch { position: relative; flex: none; }
+  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .track {
+    display: block; width: 52px; height: 32px; border-radius: 16px;
+    background: var(--line); transition: background .2s ease;
+  }
+  .track::after {
+    content: ""; position: absolute; top: 4px; left: 4px; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--surface); transition: transform .2s ease;
+  }
+  .switch input:checked + .track { background: var(--run); }
+  .switch input:checked + .track::after { transform: translateX(20px); }
+  .switch input:disabled + .track { opacity: .5; }
+
+  section.log { margin-top: 24px; }
+  .log-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .log-head h2 { font-size: 17px; margin: 0; }
+  .log-head button { min-height: 40px; padding: 8px 12px; font-size: 14px; }
+  pre {
+    margin: 0; padding: 12px; max-height: 50vh; overflow: auto;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    font: 12px/1.5 ui-monospace, "Roboto Mono", monospace; white-space: pre-wrap; word-break: break-word;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body data-page="gateway">
+<main>
+  <h1>agentbox</h1>
+
+  <div class="status" id="status" data-state="stopped" aria-live="polite">
+    <p class="status-name">Hermes gateway</p>
+    <p class="status-word" id="state-word">Memeriksa…</p>
+    <p class="status-detail" id="state-detail"></p>
+    <div class="actions">
+      <button class="primary" id="btn-toggle" disabled>Jalankan</button>
+      <button id="btn-restart" disabled>Mulai ulang</button>
+    </div>
+  </div>
+
+  <div class="notice" id="notice" role="alert" hidden></div>
+
+  <div class="row">
+    <div>
+      <p id="autostart-label">Jalankan saat HP menyala</p>
+      <p class="hint">Gateway otomatis start setelah boot selesai.</p>
+    </div>
+    <label class="switch">
+      <input type="checkbox" role="switch" id="autostart" aria-labelledby="autostart-label" disabled>
+      <span class="track"></span>
+    </label>
+  </div>
+
+  <section class="log">
+    <div class="log-head">
+      <h2>Log gateway</h2>
+      <button id="btn-log">Muat ulang log</button>
+    </div>
+    <pre id="log">Memuat…</pre>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+<script>
+  const GW = "/data/adb/modules/agentbox/lib/gateway.sh";
+  const $ = (id) => document.getElementById(id);
+  let seq = 0;
+  let busy = false;
+  let current = null;
+
+  // Bungkus ksu.exec (API WebUI KernelSU) menjadi Promise.
+  function run(cmd) {
+    return new Promise((resolve) => {
+      if (typeof ksu === "undefined" || typeof ksu.exec !== "function") {
+        resolve({ errno: -1, stdout: "", stderr: "API KernelSU tidak tersedia. Buka halaman ini dari KernelSU Manager." });
+        return;
+      }
+      const cb = "__agentbox_cb_" + Date.now() + "_" + (seq++);
+      window[cb] = (errno, stdout, stderr) => {
+        delete window[cb];
+        resolve({ errno: Number(errno), stdout: stdout || "", stderr: stderr || "" });
+      };
+      try {
+        ksu.exec(cmd, "{}", cb);
+      } catch (e) {
+        delete window[cb];
+        resolve({ errno: -1, stdout: "", stderr: String(e) });
+      }
+    });
+  }
+
+  function toast(msg) {
+    try { ksu.toast(msg); } catch (_) { /* tidak tersedia di luar KernelSU */ }
+  }
+
+  function showNotice(html) {
+    const n = $("notice");
+    if (!html) { n.hidden = true; n.innerHTML = ""; return; }
+    n.innerHTML = html;
+    n.hidden = false;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function formatUptime(sec) {
+    if (sec < 60) return "kurang dari semenit";
+    const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+    const parts = [];
+    if (d) parts.push(d + " hari");
+    if (h) parts.push(h + " jam");
+    if (m && !d) parts.push(m + " menit");
+    return parts.join(" ");
+  }
+
+  function render(s) {
+    current = s;
+    const box = $("status");
+    const word = $("state-word");
+    const detail = $("state-detail");
+    const toggle = $("btn-toggle");
+    const restart = $("btn-restart");
+
+    if (!s) {
+      box.dataset.state = "error";
+      word.textContent = "Tidak terbaca";
+      detail.textContent = "Status gateway gagal dibaca.";
+      toggle.disabled = restart.disabled = $("autostart").disabled = true;
+      return;
+    }
+
+    const ready = s.installed && s.configured;
+    box.dataset.state = s.state;
+    if (s.state === "running") {
+      word.textContent = "Berjalan";
+      detail.textContent = "Aktif " + formatUptime(s.uptime) + ", PID " + s.pid;
+    } else if (s.state === "restarting") {
+      word.textContent = "Menunggu restart";
+      detail.textContent = "Gateway berhenti dan akan dicoba lagi. Cek log di bawah.";
+    } else {
+      word.textContent = "Berhenti";
+      detail.textContent = ready ? "Gateway tidak berjalan." : "";
+    }
+
+    const active = s.state !== "stopped";
+    toggle.textContent = active ? "Hentikan" : "Jalankan";
+    toggle.disabled = busy || (!active && !ready);
+    restart.disabled = busy || !active;
+
+    const auto = $("autostart");
+    auto.checked = s.autostart;
+    auto.disabled = busy;
+
+    if (!s.installed) {
+      showNotice('Hermes belum terpasang. Pasang lewat <a href="tty.html#profile=hermes-install">Terminal → install Hermes</a>.');
+    } else if (!s.configured) {
+      showNotice('Gateway belum dikonfigurasi. Atur lewat <a href="tty.html#profile=gateway-setup">Terminal → gateway setup</a>.');
+    } else if (!busy) {
+      showNotice("");
+    }
+  }
+
+  async function refresh() {
+    const r = await run("sh " + GW + " status --json");
+    let s = null;
+    try { s = JSON.parse(r.stdout.trim()); } catch (_) { s = null; }
+    if (r.errno !== 0 && !s) showNotice(escapeHtml(r.stderr || "Status gateway gagal dibaca."));
+    render(s);
+  }
+
+  async function loadLog() {
+    const r = await run("sh " + GW + " log 200");
+    const pre = $("log");
+    pre.textContent = r.stdout.trim() || "Belum ada log. Log muncul setelah gateway dijalankan.";
+    pre.scrollTop = pre.scrollHeight;
+  }
+
+  async function act(args, pendingLabel, button) {
+    busy = true;
+    const original = button.textContent;
+    button.textContent = pendingLabel;
+    $("btn-toggle").disabled = $("btn-restart").disabled = true;
+    const r = await run("sh " + GW + " " + args);
+    busy = false;
+    button.textContent = original;
+    if (r.errno !== 0) {
+      showNotice(escapeHtml((r.stderr || r.stdout || "Perintah gagal.").trim()));
+    } else {
+      showNotice("");
+      toast(r.stdout.trim());
+    }
+    await refresh();
+    loadLog();
+  }
+
+  $("btn-toggle").addEventListener("click", (e) => {
+    const active = current && current.state !== "stopped";
+    act(active ? "stop" : "start", active ? "Menghentikan…" : "Menjalankan…", e.currentTarget);
+  });
+
+  $("btn-restart").addEventListener("click", (e) => act("restart", "Memulai ulang…", e.currentTarget));
+
+  $("autostart").addEventListener("change", async (e) => {
+    const want = e.currentTarget.checked;
+    e.currentTarget.disabled = true;
+    const r = await run("sh " + GW + " autostart " + (want ? "on" : "off"));
+    if (r.errno !== 0) {
+      showNotice(escapeHtml((r.stderr || "Pengaturan autostart gagal disimpan.").trim()));
+    } else {
+      toast(want ? "Autostart aktif" : "Autostart nonaktif");
+    }
+    await refresh();
+  });
+
+  $("btn-log").addEventListener("click", loadLog);
+
+  refresh();
+  loadLog();
+  setInterval(() => {
+    if (!busy && document.visibilityState === "visible") refresh();
+  }, 3000);
+</script>
+</body>
+</html>

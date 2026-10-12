@@ -1,0 +1,1879 @@
+#!/system/bin/sh
+# agentbox: CLI utama module agentbox (Claude Code + Hermes Agent di chroot Void Linux).
+# Jalankan `agentbox` tanpa argumen untuk ringkasan perintah.
+if [ "$(id -u)" != 0 ]; then
+	q="'$0'"
+	for a in "$@"; do
+		q="$q '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+	done
+	exec su -c "cd '$(pwd | sed "s/'/'\\\\''/g")' 2>/dev/null; exec $q"
+fi
+MODDIR=/data/adb/modules/agentbox
+# shellcheck source-path=SCRIPTDIR source=../../lib/common.sh
+. "$MODDIR/lib/common.sh"
+
+GW="$MODDIR/lib/gateway.sh"
+SETUP_SRC="$MODDIR/rootfs-setup/setup.sh"
+SETUP_IN_CHROOT=/usr/local/libexec/agentbox-setup.sh
+SETUP_LOG="$AB_LOGS/setup.log"
+VOID_MIRROR=https://repo-default.voidlinux.org/live/current
+COMPONENTS="rootfs base locale user claude uv hermes gateway"
+HERMES_STAGES="prerequisites repository venv python-deps config products setup complete"
+RC_SKIPPED=10
+
+# ---------------------------------------------------------------- tampilan
+
+if [ -t 1 ]; then
+	C_R=$(printf '\033[31m') C_G=$(printf '\033[32m') C_Y=$(printf '\033[33m')
+	C_B=$(printf '\033[1m') C_N=$(printf '\033[0m')
+else
+	C_R="" C_G="" C_Y="" C_B="" C_N=""
+fi
+
+say() { printf '%s\n' "$*"; }
+info() { printf '%s==>%s %s\n' "$C_B" "$C_N" "$*"; }
+warn() { printf '%sPERINGATAN:%s %s\n' "$C_Y" "$C_N" "$*" >&2; }
+err() { printf '%sGALAT:%s %s\n' "$C_R" "$C_N" "$*" >&2; }
+die() {
+	err "$*"
+	exit 1
+}
+
+has_tty() { [ -t 0 ] && [ -t 1 ]; }
+
+ask() {
+	printf '%s' "$1" >&2
+	read -r ask_ans || ask_ans=""
+}
+
+# Tampilkan bantuan bila argumen pertama -h/--help. Pemakaian: wants_help "$@" && { usage_x; return; }
+wants_help() {
+	case "${1:-}" in -h | --help | help) return 0 ;; esac
+	return 1
+}
+
+# ---------------------------------------------------------------- helper chroot
+
+gw() { /system/bin/sh "$GW" "$@"; }
+
+gw_running() {
+	gw status --json 2>/dev/null | grep -qE '"state":"(running|restarting)"'
+}
+
+need_rootfs() {
+	ab_rootfs_ok || die "rootfs belum ada atau rusak ($ROOTFS). Jalankan: agentbox setup (atau agentbox reset)"
+}
+
+need_mount() {
+	need_rootfs
+	ab_mount || die "mount chroot gagal. Cek: agentbox doctor"
+}
+
+# Prefix timeout opsional (busybox timeout tidak bisa menjalankan fungsi shell).
+tmo() {
+	if [ -n "${AB_TMO:-}" ]; then "$BUSYBOX" timeout "$AB_TMO" "$@"; else "$@"; fi
+}
+
+# Perintah sebagai root di chroot, env bersih.
+root_run() {
+	tmo /system/bin/env -i PATH="$AB_PATH_ANDROID" chroot "$ROOTFS" /usr/bin/env -i \
+		HOME=/root USER=root LANG=C.UTF-8 TERM="${TERM:-xterm-256color}" PATH="$AB_PATH_ROOT" "$@"
+}
+
+# Perintah sebagai agent di chroot (non-login, tanpa config/env), env bersih.
+agent_run() {
+	tmo /system/bin/env -i PATH="$AB_PATH_ANDROID" chroot "$ROOTFS" /usr/bin/setpriv \
+		--reuid="$AGENT" --regid="$AGENT" --init-groups /usr/bin/env -i \
+		HOME="$AGENT_HOME" USER="$AGENT" LOGNAME="$AGENT" LANG=C.UTF-8 \
+		TERM="${TERM:-xterm-256color}" PATH="$AB_PATH_AGENT" "$@"
+}
+
+# Login sebagai agent lewat `su - agent` (TTY diteruskan). Tanpa argumen: shell interaktif.
+# -P: pty baru. Tanpa ini `su -c` membuat session baru tanpa terminal pengendali (installer Hermes
+# melihat "no terminal"), dan proses agent tidak bisa menyuntik keystroke (TIOCSTI) ke terminal root.
+# Isi config/env ikut diteruskan lewat environment (`su -w`), tidak lewat argv.
+# shellcheck disable=SC2016  # dievaluasi oleh sh anak
+agent_login() {
+	/system/bin/env -i PATH="$AB_PATH_ANDROID" TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 \
+		AB_R="$ROOTFS" AB_E="$AB_ENV" AB_U="$AGENT" AB_SH="$AB_LOGIN_SHELL" /system/bin/sh -c '
+		w=TERM,LANG
+		if [ -f "$AB_E" ]; then
+			set -a
+			. "$AB_E"
+			set +a
+			for k in $(sed -n "s/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p" "$AB_E"); do w="$w,$k"; done
+		fi
+		r=$AB_R u=$AB_U s=${AB_SH:-/bin/bash}
+		unset AB_R AB_E AB_U AB_SH
+		if [ $# -gt 0 ]; then
+			exec chroot "$r" /usr/bin/su -l -P "$u" -s "$s" -w "$w" -c "$1"
+		fi
+		exec chroot "$r" /usr/bin/su -l -P "$u" -s "$s" -w "$w"
+	' sh "$@"
+}
+
+chroot_exists() { [ -e "$ROOTFS$1" ] || [ -L "$ROOTFS$1" ]; }
+
+with_timeout() {
+	AB_TMO=$1
+	shift
+	"$@"
+	wt_rc=$?
+	AB_TMO=""
+	return "$wt_rc"
+}
+
+# ---------------------------------------------------------------- setup: state & log
+
+is_done() { [ -f "$AB_STATE/$1.done" ]; }
+
+mark_done() {
+	mkdir -p "$AB_STATE"
+	date '+%Y-%m-%d %H:%M:%S' >"$AB_STATE/$1.done"
+}
+
+deps_of() {
+	case "$1" in
+	rootfs) echo "" ;;
+	base) echo "rootfs" ;;
+	locale | user) echo "base" ;;
+	claude) echo "user locale" ;;
+	uv) echo "user" ;;
+	hermes) echo "user locale uv" ;;
+	gateway) echo "hermes" ;;
+	esac
+}
+
+is_component() {
+	for ic in $COMPONENTS; do [ "$ic" = "$1" ] && return 0; done
+	return 1
+}
+
+# Jalankan perintah, output ke terminal sekaligus ke setup.log, pertahankan exit code.
+run_logged() {
+	mkdir -p "$AB_LOGS"
+	ab_debug "run: $*"
+	rl_rc="$AB_RUN/setup.rc"
+	mkdir -p "$AB_RUN"
+	{
+		"$@"
+		echo $? >"$rl_rc"
+	} 2>&1 | tee -a "$SETUP_LOG"
+	rl_code=$(cat "$rl_rc" 2>/dev/null || echo 1)
+	rm -f "$rl_rc"
+	ab_debug "rc=$rl_code: $*"
+	return "$rl_code"
+}
+
+# Trace `set -x` dari setup.sh (hanya mode debug) ditulis di dalam rootfs lalu dipindah ke debug.log.
+SETUP_TRACE=/var/log/agentbox/setup-trace.log
+
+setup_in_chroot() {
+	mkdir -p "$ROOTFS/usr/local/libexec"
+	cp -f "$SETUP_SRC" "$ROOTFS$SETUP_IN_CHROOT" && chmod 755 "$ROOTFS$SETUP_IN_CHROOT" || return 1
+	ab_debug "setup.sh $1 (debug=$AB_DEBUG)"
+	root_run AGENT="$AGENT" AGENT_UID="$AGENT_UID" AGENT_HOME="$AGENT_HOME" \
+		AB_ANDROID_GROUPS="$AB_ANDROID_GROUPS" AB_DEBUG="$AB_DEBUG" AB_TRACE="$SETUP_TRACE" \
+		/bin/bash "$SETUP_IN_CHROOT" "$1"
+	sc_rc=$?
+	ab_debug_file "trace setup.sh $1 (rc=$sc_rc)" "$ROOTFS$SETUP_TRACE"
+	return "$sc_rc"
+}
+
+download() {
+	ab_debug "unduh: $1 -> $2"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fL --retry 3 --connect-timeout 20 -o "$2" "$1"
+	else
+		"$BUSYBOX" wget -O "$2" "$1"
+	fi
+}
+
+fetch_stdout() {
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL --connect-timeout 20 "$1"
+	else
+		"$BUSYBOX" wget -qO- "$1"
+	fi
+}
+
+# ---------------------------------------------------------------- setup: komponen
+
+comp_rootfs() {
+	if ab_rootfs_ok && [ -e "$ROOTFS/usr/bin/xbps-install" ]; then
+		say "rootfs sudah ada di $ROOTFS"
+		return 0
+	fi
+	if [ -e "$ROOTFS" ]; then
+		err "$ROOTFS sudah ada tapi tidak lengkap. Periksa dengan: ls $ROOTFS"
+		err "Untuk membangun ulang: agentbox reset"
+		return 1
+	fi
+
+	info "mencari tarball rootfs terbaru di $VOID_MIRROR"
+	rf_name=$(fetch_stdout "$VOID_MIRROR/" | grep -oE 'void-aarch64-ROOTFS-[0-9]{8}\.tar\.xz' | sort -u | tail -n1)
+	[ -n "$rf_name" ] || {
+		err "tidak menemukan void-aarch64-ROOTFS-*.tar.xz di index mirror (cek koneksi)"
+		return 1
+	}
+	say "tarball: $rf_name"
+	rf_sum=$(fetch_stdout "$VOID_MIRROR/sha256sum.txt" | sed -n "s/^SHA256 ($rf_name) = \([0-9a-f]*\)$/\1/p")
+	[ -n "$rf_sum" ] || {
+		err "checksum $rf_name tidak ditemukan di sha256sum.txt"
+		return 1
+	}
+
+	mkdir -p "$AB_CACHE"
+	rf_file="$AB_CACHE/$rf_name"
+	if [ -f "$rf_file" ] && [ "$("$BUSYBOX" sha256sum "$rf_file" | cut -d' ' -f1)" = "$rf_sum" ]; then
+		say "memakai unduhan sebelumnya: $rf_file"
+	else
+		info "mengunduh $rf_name"
+		download "$VOID_MIRROR/$rf_name" "$rf_file.part" || return 1
+		mv -f "$rf_file.part" "$rf_file"
+		info "verifikasi sha256"
+		[ "$("$BUSYBOX" sha256sum "$rf_file" | cut -d' ' -f1)" = "$rf_sum" ] || {
+			rm -f "$rf_file"
+			err "checksum tidak cocok, unduhan dihapus. Ulangi: agentbox setup rootfs"
+			return 1
+		}
+	fi
+
+	rf_tmp="$AB_DIR/rootfs.tmp"
+	if [ -e "$rf_tmp" ]; then
+		# Sisa ekstrak yang gagal. Tidak pernah di-mount, tapi tetap diverifikasi.
+		ab_path_safe "$rf_tmp" || return 1
+		if grep -q " ${rf_tmp}[ /]" /proc/mounts; then
+			err "$rf_tmp masih memiliki mount, tidak dihapus"
+			return 1
+		fi
+		rm -rf "$rf_tmp"
+	fi
+	mkdir -p "$rf_tmp"
+	info "ekstrak ke $ROOTFS (busybox tar)"
+	"$BUSYBOX" xz -dc "$rf_file" | "$BUSYBOX" tar -xpf - -C "$rf_tmp" || {
+		err "ekstrak gagal (ruang disk cukup? cek: df /data)"
+		return 1
+	}
+	[ -e "$rf_tmp/usr/bin/xbps-install" ] || {
+		err "hasil ekstrak tidak berisi xbps-install"
+		return 1
+	}
+	mv "$rf_tmp" "$ROOTFS" || return 1
+	ab_write_resolv
+	rm -f "$rf_file"
+	ab_log INFO "rootfs $rf_name terpasang"
+}
+
+comp_base() {
+	ab_write_resolv
+	need_mount
+	if ! chroot_exists /usr/bin/bash; then
+		info "bootstrap: update xbps lalu install bash"
+		root_run xbps-install -Syu xbps || return 1
+		root_run xbps-install -Sy bash || return 1
+	fi
+	setup_in_chroot base
+}
+
+comp_simple() {
+	need_mount
+	setup_in_chroot "$1"
+}
+
+need_tty_or_skip() {
+	has_tty && return 0
+	warn "komponen $1 interaktif dan butuh terminal, dilewati."
+	say "Jalankan 'agentbox setup $1' dari terminal (Termux: su -c 'agentbox setup $1', atau adb shell -t)."
+	return 1
+}
+
+hermes_installed() { chroot_exists "$AGENT_HOME/.local/bin/hermes"; }
+
+comp_hermes() {
+	need_tty_or_skip hermes || return "$RC_SKIPPED"
+	need_mount
+	run_logged setup_in_chroot hermes-fetch || return 1
+	say ""
+	say "${C_B}Catatan sebelum installer Hermes berjalan:${C_N}"
+	say "  - Bila ditawari memasang gateway sebagai service systemd, pilih TIDAK."
+	say "    Gateway diawasi oleh agentbox (lib/gateway.sh), systemd tidak ada di chroot."
+	say "  - Stage 'gateway' installer sengaja dilewati; atur platform dengan: agentbox setup gateway"
+	say ""
+	# Mode debug: --verbose meneruskan seluruh output perintah anak installer.
+	hs_verbose=""
+	[ "$AB_DEBUG" = 1 ] && hs_verbose=" --verbose"
+	for hs in $HERMES_STAGES; do
+		info "installer Hermes: stage $hs"
+		ab_debug "installer Hermes: stage $hs"
+		agent_login "bash ~/.cache/agentbox/hermes-install.sh --stage $hs$hs_verbose" || {
+			err "stage $hs gagal. Log installer: $ROOTFS$AGENT_HOME/.hermes/logs/install.log"
+			return 1
+		}
+	done
+	hermes_installed || {
+		err "installer selesai tapi ~/.local/bin/hermes tidak ditemukan"
+		return 1
+	}
+	# Pasang ulang (setup --force hermes) saat gateway berjalan: muat ulang kode yang baru.
+	if gw_running; then
+		info "gateway sedang berjalan, restart agar memakai Hermes yang baru"
+		gw restart
+	fi
+}
+
+# Jalankan `hermes gateway setup`, rapikan permission .env, lalu (re)start gateway.
+# Setelah `hermes gateway setup` sukses: .env 600 milik agent, lalu penanda gateway.done
+# (dibaca gw_configured di gateway.sh; ditulis di sini karena gw start bisa langsung menyusul).
+gateway_fix_env() {
+	gs_env="$AGENT_HOME/.hermes/.env"
+	if [ ! -f "$ROOTFS$gs_env" ]; then
+		err "$gs_env tidak ditemukan setelah wizard; gateway belum dikonfigurasi"
+		return 1
+	fi
+	if ! root_run chown "$AGENT:$AGENT" "$gs_env" || ! root_run chmod 600 "$gs_env"; then
+		err "gagal merapikan permission $gs_env"
+		return 1
+	fi
+	say "permission $gs_env dirapikan (600, $AGENT)"
+	mark_done gateway
+	say "gateway ditandai sudah dikonfigurasi"
+}
+
+hermes_gateway_setup() {
+	agent_login "hermes gateway setup" || return 1
+	gateway_fix_env
+}
+
+# `agentbox config gateway --finish`: langkah setelah wizard, tanpa TTY. Dipakai terminal WebUI, yang
+# menjalankan wizard-nya sendiri. Konfigurasi pertama -> seperti `setup gateway` (autostart on + start);
+# konfigurasi ulang -> seperti `config gateway` (restart hanya bila sedang berjalan).
+config_gateway_finish() {
+	need_mount
+	hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
+	gf_first=1
+	is_done gateway && gf_first=0
+	gateway_fix_env || return 1
+	if [ "$gf_first" = 1 ]; then
+		gw autostart on
+		if gw_running; then gw restart; else gw start; fi
+	elif gw_running; then
+		gw restart
+	else
+		say "gateway tidak berjalan; start dengan: agentbox service start"
+	fi
+}
+
+comp_gateway() {
+	need_tty_or_skip gateway || return "$RC_SKIPPED"
+	need_mount
+	say "Catatan: bila wizard menawarkan memasang service systemd, pilih TIDAK."
+	hermes_gateway_setup || return 1
+	gw autostart on
+	if gw_running; then gw restart; else gw start; fi
+}
+
+run_component() {
+	case "$1" in
+	rootfs) comp_rootfs ;;
+	base) comp_base ;;
+	locale | user | claude | uv) comp_simple "$1" ;;
+	hermes) comp_hermes ;;
+	gateway) comp_gateway ;;
+	esac
+}
+
+show_failure() {
+	err "komponen '$1' gagal."
+	if [ -f "$SETUP_LOG" ]; then
+		say "Baris log yang relevan ($SETUP_LOG):"
+		tail -n 200 "$SETUP_LOG" | grep -iE 'error|gagal|fail|denied|not found|unable|cannot|could not' | grep -v 'already installed' | tail -n 8 | sed 's/^/  | /'
+	fi
+	say "Ulangi dengan: agentbox setup $1   (atau --force untuk mengabaikan penanda)"
+}
+
+usage_setup() {
+	cat <<EOF
+Pemakaian: agentbox setup [--force] [komponen...]
+
+Setup modular dan idempoten. Komponen (urut dependensi):
+  rootfs   unduh + ekstrak rootfs Void aarch64 (glibc)
+  base     resolv.conf, update xbps, paket dasar + build deps
+  locale   glibc-locales, en_US.UTF-8
+  user     buat user agent (uid $AGENT_UID, tanpa sudo)
+  claude   Claude Code via installer resmi
+  uv       uv via installer resmi
+  hermes   Hermes Agent via installer resmi (interaktif, butuh TTY)
+  gateway  hermes gateway setup, lalu autostart + start (interaktif, butuh TTY)
+
+Tanpa komponen: menu (bila ada TTY) atau semua yang belum selesai.
+--force   jalankan ulang walau penanda state/<komponen>.done ada.
+EOF
+}
+
+setup_menu() {
+	say "Komponen setup:"
+	sm_i=0
+	sm_default=""
+	for c in $COMPONENTS; do
+		sm_i=$((sm_i + 1))
+		if is_done "$c"; then
+			sm_st="${C_G}selesai${C_N}"
+		else
+			sm_st="${C_Y}belum${C_N}"
+			sm_default="$sm_default $c"
+		fi
+		printf '  %d) %-8s [%s]\n' "$sm_i" "$c" "$sm_st"
+	done
+	if [ -z "$sm_default" ]; then
+		say "Semua komponen sudah selesai. Pilih nomor untuk menjalankan ulang (dengan --force), atau Enter untuk keluar."
+	fi
+	ask "Pilih nomor dipisah spasi [Enter = semua yang belum selesai]: "
+	if [ -z "$ask_ans" ]; then
+		MENU_PICK=$sm_default
+		return 0
+	fi
+	MENU_PICK=""
+	for n in $ask_ans; do
+		case "$n" in *[!0-9]*)
+			err "pilihan tidak valid: $n"
+			return 1
+			;;
+		esac
+		sm_c=$(echo "$COMPONENTS" | tr ' ' '\n' | sed -n "${n}p")
+		[ -n "$sm_c" ] || {
+			err "pilihan tidak valid: $n"
+			return 1
+		}
+		MENU_PICK="$MENU_PICK $sm_c"
+		MENU_FORCE=1
+	done
+}
+
+cmd_setup() {
+	force=0
+	MENU_FORCE=0
+	req=""
+	for a in "$@"; do
+		case "$a" in
+		-h | --help)
+			usage_setup
+			return 0
+			;;
+		-f | --force) force=1 ;;
+		-*) die "opsi tidak dikenal: $a (lihat agentbox setup --help)" ;;
+		*)
+			is_component "$a" || die "komponen tidak dikenal: $a (lihat agentbox setup --help)"
+			req="$req $a"
+			;;
+		esac
+	done
+	[ "$(uname -m)" = aarch64 ] || die "arsitektur $(uname -m) tidak didukung (butuh aarch64)"
+
+	if [ -z "$req" ]; then
+		if has_tty; then
+			setup_menu || return 1
+			req=$MENU_PICK
+			[ "$MENU_FORCE" = 1 ] && force=1
+		else
+			for c in $COMPONENTS; do is_done "$c" || req="$req $c"; done
+		fi
+	fi
+	[ -n "$req" ] || {
+		say "Tidak ada yang perlu dijalankan."
+		return 0
+	}
+
+	# Tambahkan dependensi yang belum selesai (berulang sampai stabil).
+	want=" $req "
+	changed=1
+	while [ "$changed" = 1 ]; do
+		changed=0
+		for c in $want; do
+			for d in $(deps_of "$c"); do
+				case "$want" in *" $d "*) ;; *)
+					if ! is_done "$d"; then
+						want="$want$d "
+						changed=1
+					fi
+					;;
+				esac
+			done
+		done
+	done
+	plan=""
+	for c in $COMPONENTS; do
+		case "$want" in *" $c "*) plan="$plan $c" ;; esac
+	done
+
+	mkdir -p "$AB_STATE" "$AB_LOGS"
+	echo "===== $(date '+%Y-%m-%d %H:%M:%S') agentbox setup$plan" >>"$SETUP_LOG"
+	ab_log INFO "setup:$plan"
+	ab_debug "setup: build=$AB_BUILD force=$force req=$req plan=$plan tty=$(has_tty && echo ya || echo tidak)"
+	total=$(echo "$plan" | wc -w)
+	i=0
+	skipped=""
+	for c in $plan; do
+		i=$((i + 1))
+		case " $req " in *" $c "*) c_forced=$force ;; *) c_forced=0 ;; esac
+		if is_done "$c" && [ "$c_forced" = 0 ]; then
+			info "[$i/$total] $c: sudah selesai, dilewati"
+			continue
+		fi
+		blocked=""
+		for d in $(deps_of "$c"); do is_done "$d" || blocked="$blocked $d"; done
+		if [ -n "$blocked" ]; then
+			warn "[$i/$total] $c dilewati: dependensi belum selesai:$blocked"
+			skipped="$skipped $c"
+			continue
+		fi
+		info "[$i/$total] $c"
+		c_t0=$(date +%s)
+		ab_debug "komponen $c mulai"
+		case "$c" in
+		hermes | gateway)
+			run_component "$c"
+			rc=$?
+			;;
+		*)
+			run_logged run_component "$c"
+			rc=$?
+			;;
+		esac
+		if [ "$rc" = 0 ]; then
+			mark_done "$c"
+			ab_log INFO "setup $c selesai"
+			ab_debug "komponen $c selesai ($(($(date +%s) - c_t0)) dtk)"
+		elif [ "$rc" = "$RC_SKIPPED" ]; then
+			ab_debug "komponen $c dilewati (butuh TTY)"
+			skipped="$skipped $c"
+		else
+			ab_log ERROR "setup $c gagal (kode $rc)"
+			ab_debug "komponen $c GAGAL kode $rc ($(($(date +%s) - c_t0)) dtk)"
+			show_failure "$c"
+			return 1
+		fi
+	done
+
+	say ""
+	info "menjalankan agentbox doctor"
+	cmd_doctor
+	say ""
+	say "${C_B}Langkah berikutnya:${C_N}"
+	[ -n "$skipped" ] && say "  - komponen belum selesai:$skipped -> jalankan 'agentbox setup' dari terminal (Termux / adb shell -t)"
+	grep -q '^ANTHROPIC_API_KEY=' "$AB_ENV" 2>/dev/null ||
+		say "  - jalankan 'agentbox config' untuk mengatur API key (atau login di dalam 'claude')"
+	is_done claude && say "  - jalankan 'claude' (atau 'agentbox shell' lalu 'claude')"
+	is_done gateway || { is_done hermes && say "  - atur Telegram dsb.: agentbox setup gateway"; }
+	return 0
+}
+
+# ---------------------------------------------------------------- shell
+
+usage_shell() {
+	cat <<EOF
+Pemakaian: agentbox shell [--root | --safe]
+
+  (default)  masuk chroot sebagai user agent (su - agent, HOME=$AGENT_HOME)
+  --root     masuk sebagai root untuk perbaikan manual
+  --safe     rescue mode (root, /bin/sh tanpa profile, hanya /proc dan /dev di-mount)
+EOF
+}
+
+shell_failed() {
+	err "chroot gagal menjalankan shell (kode $1)."
+	say "Inspeksi dari luar:  ls $ROOTFS"
+	say "Coba rescue mode:    agentbox shell --safe"
+	say "Bangun ulang:        agentbox reset"
+}
+
+cmd_shell() {
+	mode=agent
+	case "${1:-}" in
+	-h | --help)
+		usage_shell
+		return 0
+		;;
+	--root) mode=root ;;
+	--safe) mode=safe ;;
+	"") ;;
+	*) die "opsi tidak dikenal: $1 (lihat agentbox shell --help)" ;;
+	esac
+
+	if [ "$mode" = safe ]; then
+		shell_safe
+		return
+	fi
+
+	need_rootfs
+	if [ -x "$ROOTFS/usr/bin/bash" ]; then
+		sh_bin=/bin/bash
+	elif [ -e "$ROOTFS/bin/sh" ]; then
+		sh_bin=/bin/sh
+	else
+		err "tidak ada /bin/bash maupun /bin/sh di rootfs."
+		say "Rootfs kemungkinan rusak. Bangun ulang dengan: agentbox reset"
+		return 1
+	fi
+	if [ "$mode" = agent ] && ! ab_has_agent; then
+		err "user agent belum dibuat, jalankan 'agentbox setup user' atau masuk dengan '--root'"
+		return 1
+	fi
+
+	sh_mounted_before=0
+	ab_is_mounted "$ROOTFS/sdcard" && sh_mounted_before=1
+	ab_mount || die "mount chroot gagal. Cek: agentbox doctor"
+
+	if [ "$mode" = root ]; then
+		if [ "$sh_bin" = /bin/bash ]; then sh_args="-l"; else sh_args=""; fi
+		# shellcheck disable=SC2016  # dievaluasi oleh sh di chroot
+		/system/bin/env -i PATH="$AB_PATH_ANDROID" chroot "$ROOTFS" /usr/bin/env -i \
+			HOME=/root USER=root LOGNAME=root SHELL="$sh_bin" TERM="${TERM:-xterm-256color}" \
+			LANG=C.UTF-8 PATH="$AB_PATH_ROOT" PS1='[agentbox] root# ' \
+			/bin/sh -c 'cd /root 2>/dev/null || cd /; exec "$0" $1' "$sh_bin" "$sh_args"
+		rc=$?
+	else
+		AB_LOGIN_SHELL=$sh_bin agent_login
+		rc=$?
+	fi
+	case "$rc" in 126 | 127) shell_failed "$rc" ;; esac
+
+	# Jangan umount bila gateway atau proses lain masih memakai chroot.
+	if [ "$sh_mounted_before" = 0 ] && ! gw_running && ! ab_chroot_busy; then
+		ab_umount || warn "umount tidak bersih, cek: agentbox status"
+	fi
+	return "$rc"
+}
+
+shell_safe() {
+	[ -d "$ROOTFS" ] || die "$ROOTFS tidak ada. Jalankan: agentbox setup"
+	if ab_is_mounted "$ROOTFS/sdcard"; then
+		if gw_running || ab_chroot_busy; then
+			warn "/sdcard masih ter-mount karena chroot sedang dipakai (gateway/sesi lain). Hati-hati dengan rm."
+		else
+			umount "$ROOTFS/sdcard" 2>/dev/null || umount -l "$ROOTFS/sdcard"
+		fi
+	fi
+	ab_mount_min || die "mount /proc dan /dev gagal"
+	cat <<EOF
+${C_Y}========== agentbox RESCUE MODE ==========${C_N}
+rootfs   : $ROOTFS
+user     : root, /bin/sh tanpa profile
+di-mount : /proc, /dev saja (tanpa /sdcard)
+
+Perintah berguna:
+  xbps-install -f <pkg>   install ulang paket yang rusak (mis. bash, glibc)
+  xbps-pkgdb -a           cek konsistensi semua paket
+  xbps-install -Syu       update sistem
+Keluar dengan 'exit'.
+${C_Y}===========================================${C_N}
+EOF
+	/system/bin/env -i HOME=/root TERM="${TERM:-xterm-256color}" PATH="$AB_PATH_ROOT" ENV= \
+		PS1='[agentbox:safe] root# ' /system/bin/chroot "$ROOTFS" /bin/sh -i
+	rc=$?
+	case "$rc" in 126 | 127) shell_failed "$rc" ;; esac
+	return "$rc"
+}
+
+# ---------------------------------------------------------------- exec / install / update
+
+cmd_exec() {
+	if [ $# -eq 0 ] || wants_help "$@"; then
+		say "Pemakaian: agentbox exec <perintah> [argumen...]"
+		say "Jalankan satu perintah di chroot sebagai root, lalu keluar."
+		return 0
+	fi
+	need_mount
+	root_run "$@"
+}
+
+cmd_install() {
+	if [ $# -eq 0 ] || wants_help "$@"; then
+		say "Pemakaian: agentbox install <paket...>"
+		say "Shortcut xbps-install -Sy di dalam chroot (sebagai root)."
+		return 0
+	fi
+	need_mount
+	root_run xbps-install -Sy "$@"
+}
+
+cmd_update() {
+	if wants_help "$@"; then
+		say "Pemakaian: agentbox update"
+		say "Update rootfs (xbps-install -Syu), Claude Code (claude update), dan Hermes (hermes update)."
+		return 0
+	fi
+	need_mount
+	info "update xbps"
+	root_run xbps-install -Syu xbps || die "update xbps gagal"
+	info "update paket rootfs"
+	root_run xbps-install -yu || die "update paket gagal"
+	if chroot_exists "$AGENT_HOME/.local/bin/claude"; then
+		info "update Claude Code"
+		agent_run claude update || warn "update Claude Code gagal"
+	fi
+	if hermes_installed; then
+		info "update Hermes Agent"
+		if agent_run hermes update; then
+			gw_running && gw restart
+		else
+			warn "update Hermes gagal"
+		fi
+	fi
+	say "Selesai."
+}
+
+# ---------------------------------------------------------------- config
+
+mask() {
+	mk_len=${#1}
+	if [ "$mk_len" -gt 12 ]; then
+		printf '%s…%s' "$(printf '%s' "$1" | cut -c1-7)" "$(printf '%s' "$1" | cut -c$((mk_len - 3))-)"
+	else
+		printf '****'
+	fi
+}
+
+# Baca nilai KEY dari config/env tanpa men-source seluruh file ke shell ini.
+# shellcheck disable=SC2016  # dievaluasi oleh sh anak
+env_get() {
+	[ -f "$AB_ENV" ] || return 1
+	/system/bin/env -i AB_E="$AB_ENV" AB_K="$1" /system/bin/sh -c '
+		set -a; . "$AB_E"; set +a
+		eval "v=\${$AB_K-}"
+		[ -n "$v" ] || exit 1
+		printf "%s" "$v"'
+}
+
+valid_key() {
+	case "$1" in
+	"" | [0-9]* | *[!A-Za-z0-9_]*) return 1 ;;
+	esac
+	return 0
+}
+
+env_fix_perm() {
+	[ -f "$AB_ENV" ] || return 0
+	chown 0:0 "$AB_ENV" && chmod 600 "$AB_ENV"
+}
+
+env_set() {
+	valid_key "$1" || die "nama variabel tidak valid: $1"
+	mkdir -p "$AB_CONFIG"
+	chmod 700 "$AB_CONFIG"
+	es_tmp="$AB_ENV.tmp.$$"
+	(
+		umask 077
+		[ -f "$AB_ENV" ] && grep -v "^$1=" "$AB_ENV"
+		printf '%s=%s\n' "$1" "$(ab_quote "$2")"
+	) >"$es_tmp" || {
+		rm -f "$es_tmp"
+		die "gagal menulis $AB_ENV"
+	}
+	mv -f "$es_tmp" "$AB_ENV"
+	env_fix_perm
+	ab_log INFO "config: $1 diset"
+}
+
+env_unset() {
+	valid_key "$1" || die "nama variabel tidak valid: $1"
+	[ -f "$AB_ENV" ] || return 0
+	eu_tmp="$AB_ENV.tmp.$$"
+	(
+		umask 077
+		grep -v "^$1=" "$AB_ENV"
+	) >"$eu_tmp"
+	mv -f "$eu_tmp" "$AB_ENV"
+	env_fix_perm
+	ab_log INFO "config: $1 dihapus"
+}
+
+read_secret() {
+	printf '%s' "$1" >&2
+	stty -echo 2>/dev/null
+	read -r rs_val || rs_val=""
+	stty echo 2>/dev/null
+	printf '\n' >&2
+}
+
+env_show() {
+	if [ ! -s "$AB_ENV" ]; then
+		say "(config/env kosong)"
+		return 0
+	fi
+	# shellcheck disable=SC2013  # nama variabel, satu kata per baris
+	for k in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$AB_ENV"); do
+		v=$(env_get "$k") || v=""
+		printf '  %-24s %s\n' "$k" "$(mask "$v")"
+	done
+}
+
+usage_config() {
+	cat <<EOF
+Pemakaian: agentbox config [subperintah]
+
+  (tanpa argumen)       menu interaktif
+  show                  tampilkan variabel tersimpan (masked)
+  show --json           JSON (dipakai WebUI): config/env + ringkasan konfigurasi Hermes, semua tersamar
+  set KEY --stdin       nilai dibaca dari stdin (dipakai WebUI, tanpa TTY)
+  auth-check [--json]   cek kredensial Anthropic Claude Code & Hermes langsung ke API (tanpa percakapan)
+  hermes-link-claude    Hermes memakai login Claude Code (claude auth login; diperbarui otomatis)
+  hermes-api on|rotate|off|show|status [--json]
+                        API Server Hermes (127.0.0.1:8642) untuk aplikasi klien (mis. hermes-android)
+  hermes-key KEY --stdin  ganti API key/token Hermes lewat 'hermes config set' (hanya kunci provider
+                        aktif atau rahasia yang sudah ada); gateway berjalan di-restart
+  set KEY [VALUE]       simpan variabel; tanpa VALUE ditanya tanpa echo (disarankan untuk secret)
+  unset KEY             hapus variabel
+  hermes                jalankan 'hermes setup' (model/provider) sebagai agent
+  gateway               jalankan 'hermes gateway setup' (Telegram dsb.) lalu restart service
+  gateway --finish      hanya langkah setelah wizard (rapikan .env, tandai, start/restart); tanpa TTY
+
+Variabel disimpan di $AB_ENV (chmod 600, root) dan diteruskan ke claude/hermes.
+EOF
+}
+
+config_gateway() {
+	has_tty || die "butuh terminal. Jalankan dari Termux (su -c 'agentbox config gateway') atau adb shell -t"
+	need_mount
+	hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
+	say "Catatan: bila wizard menawarkan memasang service systemd, pilih TIDAK."
+	hermes_gateway_setup || die "gateway setup gagal"
+	if gw_running; then gw restart; fi
+}
+
+config_hermes() {
+	has_tty || die "butuh terminal. Jalankan dari Termux atau adb shell -t"
+	need_mount
+	hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
+	agent_login "hermes setup"
+	if gw_running; then gw restart; fi
+}
+
+config_menu() {
+	has_tty || {
+		usage_config
+		return 1
+	}
+	while :; do
+		say ""
+		say "${C_B}Konfigurasi agentbox${C_N} ($AB_ENV)"
+		env_show
+		say ""
+		say "  1) Atur ANTHROPIC_API_KEY (Claude Code)"
+		say "  2) Atur variabel lain"
+		say "  3) Hapus variabel"
+		say "  4) Konfigurasi Hermes (hermes setup: model/provider)"
+		say "  5) Konfigurasi gateway (Telegram dsb.)"
+		say "  q) Keluar"
+		ask "Pilihan: "
+		case "$ask_ans" in
+		1)
+			read_secret "ANTHROPIC_API_KEY (input tidak ditampilkan): "
+			if [ -n "$rs_val" ]; then env_set ANTHROPIC_API_KEY "$rs_val" && say "Tersimpan: $(mask "$rs_val")"; fi
+			;;
+		2)
+			ask "Nama variabel: "
+			cm_k=$ask_ans
+			valid_key "$cm_k" || {
+				err "nama tidak valid"
+				continue
+			}
+			read_secret "Nilai $cm_k (tidak ditampilkan): "
+			env_set "$cm_k" "$rs_val" && say "Tersimpan: $(mask "$rs_val")"
+			;;
+		3)
+			ask "Nama variabel yang dihapus: "
+			[ -n "$ask_ans" ] && env_unset "$ask_ans"
+			;;
+		4) config_hermes ;;
+		5) config_gateway ;;
+		q | Q | "") return 0 ;;
+		*) err "pilihan tidak dikenal" ;;
+		esac
+	done
+}
+
+cmd_config() {
+	case "${1:-}" in
+	-h | --help) usage_config ;;
+	"") config_menu ;;
+	show | list)
+		if [ "${2:-}" = --json ]; then config_show_json; else env_show; fi
+		;;
+	set)
+		[ -n "${2:-}" ] || die "pemakaian: agentbox config set KEY [VALUE | --stdin]"
+		if [ "${3:-}" = --stdin ]; then
+			read_value_stdin || exit 1
+			anth_guard claude "$2" "$rv_val"
+			env_set "$2" "$rv_val"
+		elif [ $# -ge 3 ]; then
+			anth_guard claude "$2" "$3"
+			env_set "$2" "$3"
+		else
+			has_tty || die "tanpa VALUE butuh terminal; atau: agentbox config set KEY VALUE"
+			read_secret "Nilai $2 (tidak ditampilkan): "
+			anth_guard claude "$2" "$rs_val"
+			env_set "$2" "$rs_val"
+		fi
+		say "$2 tersimpan."
+		;;
+	unset)
+		[ -n "${2:-}" ] || die "pemakaian: agentbox config unset KEY"
+		env_unset "$2"
+		say "$2 dihapus."
+		;;
+	gateway)
+		if [ "${2:-}" = --finish ]; then
+			config_gateway_finish || exit 1
+		else
+			config_gateway
+		fi
+		;;
+	hermes) config_hermes ;;
+	hermes-api) config_hermes_api "${2:-status}" "${3:-}" ;;
+	auth-check) config_auth_check "${2:-}" ;;
+	hermes-link-claude) config_hermes_link_claude ;;
+	hermes-key)
+		if [ -z "${2:-}" ] || [ "${3:-}" != --stdin ]; then
+			die "pemakaian: agentbox config hermes-key KEY --stdin"
+		fi
+		config_hermes_key "$2"
+		;;
+	*) die "subperintah config tidak dikenal: $1 (lihat agentbox config --help)" ;;
+	esac
+}
+
+# ---------------------------------------------------------------- doctor
+
+DR_FAIL=0
+DR_WARN=0
+
+dr_ok() { printf '  %s%-4s%s %s\n' "$C_G" OK "$C_N" "$1"; }
+dr_warn() {
+	DR_WARN=$((DR_WARN + 1))
+	printf '  %s%-4s%s %s\n' "$C_Y" WARN "$C_N" "$1"
+	[ -n "${2:-}" ] && printf '       -> %s\n' "$2"
+	return 0
+}
+dr_fail() {
+	DR_FAIL=$((DR_FAIL + 1))
+	printf '  %s%-4s%s %s\n' "$C_R" FAIL "$C_N" "$1"
+	[ -n "${2:-}" ] && printf '       -> %s\n' "$2"
+	return 0
+}
+dr_fixing() { printf '       %s[fix]%s %s\n' "$C_B" "$C_N" "$1"; }
+
+# Laporkan hasil ac_check/auth_check_* (variabel ac_*) sebagai OK/WARN/FAIL. $1 label, $2 saran perbaikan.
+dr_auth() {
+	case "$ac_status" in
+	valid | refreshable) dr_ok "$1: $(ac_text)" ;;
+	invalid | wrong-var) dr_fail "$1: $(ac_text)" "$2" ;;
+	*) dr_warn "$1: $(ac_text)" "$2" ;;
+	esac
+}
+
+cmd_doctor() {
+	fix=0
+	case "${1:-}" in
+	-h | --help)
+		say "Pemakaian: agentbox doctor [--fix]"
+		say "Diagnosis lingkungan. --fix hanya melakukan perbaikan non-destruktif:"
+		say "tulis ulang resolv.conf, mount ulang, restart service, perbaiki permission config/env."
+		return 0
+		;;
+	--fix) fix=1 ;;
+	"") ;;
+	*) die "opsi tidak dikenal: $1" ;;
+	esac
+	DR_FAIL=0
+	DR_WARN=0
+	say "${C_B}agentbox doctor${C_N}"
+
+	if [ "$(uname -m)" = aarch64 ]; then dr_ok "arsitektur aarch64"; else dr_fail "arsitektur $(uname -m), butuh aarch64"; fi
+
+	dr_free=$(df -k /data 2>/dev/null | awk 'NR==2 {print $4}')
+	if [ -z "$dr_free" ]; then
+		dr_warn "ruang /data tidak terbaca"
+	elif [ "$dr_free" -lt 1048576 ]; then
+		dr_fail "ruang /data tersisa $((dr_free / 1024)) MB" "kosongkan penyimpanan (butuh beberapa GB)"
+	elif [ "$dr_free" -lt 3145728 ]; then
+		dr_warn "ruang /data tersisa $((dr_free / 1024)) MB" "setup lengkap butuh sekitar 3 GB"
+	else
+		dr_ok "ruang /data tersisa $((dr_free / 1024)) MB"
+	fi
+
+	if ab_rootfs_ok && [ -e "$ROOTFS/usr/bin/xbps-install" ]; then
+		dr_ok "rootfs ada ($ROOTFS)"
+	else
+		dr_fail "rootfs tidak ada / tidak lengkap" "agentbox setup rootfs  (atau agentbox reset bila rusak)"
+		say ""
+		say "Ringkasan: $DR_FAIL FAIL, $DR_WARN WARN"
+		return 1
+	fi
+
+	dr_missing=""
+	for d in dev dev/pts proc sys dev/shm sdcard; do
+		ab_is_mounted "$ROOTFS/$d" || dr_missing="$dr_missing /$d"
+	done
+	if [ -z "$dr_missing" ]; then
+		dr_ok "semua mount aktif"
+	elif [ "$fix" = 1 ]; then
+		dr_fixing "mount ulang"
+		if ab_mount; then dr_ok "mount diperbaiki"; else dr_fail "mount gagal:$dr_missing" "cek $AB_LOGS/agentbox.log"; fi
+	else
+		dr_warn "belum ter-mount:$dr_missing" "agentbox mount  (atau doctor --fix)"
+	fi
+	dr_mounted=0
+	ab_is_mounted "$ROOTFS/proc" && ab_is_mounted "$ROOTFS/dev" && dr_mounted=1
+
+	if [ -f "$ROOTFS/etc/resolv.conf" ] && [ ! -L "$ROOTFS/etc/resolv.conf" ] &&
+		grep -q '^nameserver' "$ROOTFS/etc/resolv.conf"; then
+		dr_ok "resolv.conf berisi nameserver"
+	elif [ "$fix" = 1 ]; then
+		dr_fixing "tulis ulang resolv.conf"
+		ab_write_resolv && dr_ok "resolv.conf ditulis ulang"
+	else
+		dr_fail "resolv.conf kosong/symlink" "agentbox doctor --fix"
+	fi
+
+	dr_dns=0
+	if [ "$dr_mounted" = 1 ]; then
+		if with_timeout 10 root_run getent hosts api.anthropic.com >/dev/null 2>&1; then
+			dr_dns=1
+			dr_ok "DNS: api.anthropic.com ter-resolve"
+			dr_code=$(with_timeout 20 root_run curl -sS -o /dev/null -m 15 -w '%{http_code}' https://api.anthropic.com 2>/dev/null)
+			dr_rc=$?
+			if [ "$dr_rc" = 0 ]; then
+				dr_ok "HTTPS + sertifikat OK (HTTP $dr_code)"
+			elif [ "$dr_rc" = 60 ] || [ "$dr_rc" = 77 ]; then
+				dr_fail "sertifikat TLS tidak valid (curl $dr_rc)" "agentbox install ca-certificates; cek tanggal/jam HP"
+			else
+				dr_warn "koneksi HTTPS gagal (curl $dr_rc)" "cek koneksi internet"
+			fi
+		else
+			dr_warn "DNS gagal (offline?)" "cek internet; agentbox doctor --fix menulis ulang resolv.conf"
+		fi
+	else
+		dr_warn "DNS/HTTPS tidak dicek (chroot belum ter-mount)"
+	fi
+
+	if [ -x "$ROOTFS/usr/bin/locale" ] && root_run locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+		dr_ok "locale en_US.UTF-8"
+	else
+		dr_warn "locale en_US.UTF-8 belum aktif" "agentbox setup locale"
+	fi
+
+	if chroot_exists /usr/bin/setpriv; then
+		dr_ok "setpriv (util-linux) ada"
+	else
+		dr_fail "setpriv tidak ada (dibutuhkan gateway)" "agentbox install util-linux"
+	fi
+
+	if ab_has_agent; then
+		dr_uid=$(grep "^$AGENT:" "$ROOTFS/etc/passwd" | cut -d: -f3)
+		if [ "$dr_uid" = "$AGENT_UID" ]; then dr_ok "user agent (uid $dr_uid)"; else dr_warn "user agent ber-uid $dr_uid (bisa bentrok AID Android)" "agentbox setup --force user"; fi
+		dr_groups=$(awk -F: -v u="$AGENT" '{n=split($4,m,","); for(i=1;i<=n;i++) if(m[i]==u) print $3}' "$ROOTFS/etc/group" | tr '\n' ' ')
+		case " $dr_groups " in
+		*" 3003 "*) dr_ok "agent di grup inet (3003)" ;;
+		*) dr_fail "agent tidak di grup inet (3003): akses jaringan ditolak kernel Android" "agentbox setup --force user" ;;
+		esac
+		if grep -E '^(wheel|sudo):' "$ROOTFS/etc/group" | cut -d: -f4 | tr ',' '\n' | grep -qx "$AGENT"; then
+			dr_fail "agent ada di grup wheel/sudo" "agentbox exec gpasswd -d $AGENT wheel"
+		fi
+	else
+		dr_fail "user agent belum ada" "agentbox setup user"
+	fi
+
+	if [ "$dr_mounted" = 1 ] && ab_has_agent && chroot_exists /usr/bin/setpriv; then
+		if [ "$dr_dns" = 1 ] && chroot_exists /usr/bin/curl; then
+			if with_timeout 20 agent_run curl -sS -o /dev/null -m 15 https://api.anthropic.com 2>/dev/null; then
+				dr_ok "agent bisa mengakses internet"
+			else
+				dr_fail "root online tapi agent tidak bisa mengakses internet" \
+					"cek uid agent < 10000 dan grup aid_inet (3003): agentbox setup --force user"
+			fi
+		fi
+		if chroot_exists "$AGENT_HOME/.local/bin/claude"; then
+			if dr_v=$(with_timeout 30 agent_run claude --version 2>&1) && [ -n "$dr_v" ]; then
+				dr_ok "claude: $(echo "$dr_v" | head -n1)"; else dr_fail "claude --version gagal" "agentbox setup --force claude"; fi
+		else
+			dr_warn "Claude Code belum terpasang" "agentbox setup claude"
+		fi
+		if ab_is_mounted "$ROOTFS/sdcard"; then
+			# shellcheck disable=SC2016  # dievaluasi oleh sh di chroot
+			if agent_run sh -c 't=/sdcard/.agentbox-w.$$; : >"$t" && rm -f "$t"' 2>/dev/null; then
+				dr_ok "agent bisa menulis ke /sdcard"
+			else
+				dr_warn "agent tidak bisa menulis ke /sdcard" "cek grup media_rw (1023): agentbox setup --force user; atau simpan proyek di $AGENT_HOME"
+			fi
+		fi
+	fi
+
+	if hermes_installed; then dr_ok "Hermes terpasang"; else dr_warn "Hermes belum terpasang" "agentbox setup hermes"; fi
+
+	if [ -f "$AB_ENV" ]; then
+		dr_perm=$(stat -c '%a %u' "$AB_ENV" 2>/dev/null)
+		if [ "$dr_perm" != "600 0" ]; then
+			if [ "$fix" = 1 ]; then
+				dr_fixing "permission config/env"
+				env_fix_perm && dr_ok "permission config/env diperbaiki"
+			else
+				dr_fail "permission config/env = $dr_perm (harus 600 root)" "agentbox doctor --fix"
+			fi
+		fi
+	fi
+	# Kredensial dicek langsung ke Anthropic (GET /v1/models); offline -> WARN, bukan FAIL.
+	auth_check_claude
+	dr_auth "Kredensial Claude Code" "Terminal → login Claude Code (claude auth login)"
+	if hermes_installed && [ "$(ab_hermes_model_key provider)" = anthropic ]; then
+		auth_check_hermes
+		dr_auth "Kredensial Anthropic Hermes" "setelah login Claude Code: agentbox config hermes-link-claude"
+	fi
+
+	dr_gw=$(gw status --json 2>/dev/null)
+	dr_state=$(printf '%s' "$dr_gw" | sed -n 's/.*"state":"\([a-z]*\)".*/\1/p')
+	case "$dr_gw" in *'"configured":true'*) dr_conf=1 ;; *) dr_conf=0 ;; esac
+	case "$dr_gw" in *'"autostart":true'*) dr_auto=1 ;; *) dr_auto=0 ;; esac
+	if [ "$dr_conf" = 1 ]; then
+		dr_ok "gateway dikonfigurasi (hermes gateway setup selesai)"
+	elif hermes_installed; then
+		dr_warn "gateway belum dikonfigurasi" "agentbox setup gateway"
+	fi
+	case "$dr_state" in
+	running) dr_ok "gateway berjalan" ;;
+	restarting) dr_warn "gateway sedang restart (crash?)" "agentbox service log" ;;
+	*)
+		if [ "$dr_auto" = 1 ] && [ "$dr_conf" = 1 ]; then
+			if [ "$fix" = 1 ]; then
+				dr_fixing "start gateway"
+				if gw start >/dev/null 2>&1; then dr_ok "gateway dijalankan"; else dr_fail "gateway gagal start" "agentbox service log"; fi
+			else
+				dr_warn "autostart aktif tapi gateway berhenti" "agentbox service start  (atau doctor --fix)"
+			fi
+		else
+			dr_ok "gateway berhenti (autostart $([ "$dr_auto" = 1 ] && echo on || echo off))"
+		fi
+		;;
+	esac
+
+	if hermes_installed && [ "$dr_mounted" = 1 ]; then
+		say ""
+		say "--- hermes doctor ---"
+		with_timeout 90 agent_run hermes doctor 2>&1 | sed 's/^/  | /'
+		say "---------------------"
+	fi
+
+	say ""
+	say "Ringkasan: $DR_FAIL FAIL, $DR_WARN WARN"
+	[ "$DR_FAIL" = 0 ]
+}
+
+cmd_repair() {
+	if wants_help "$@"; then
+		say "Pemakaian: agentbox repair"
+		say "doctor --fix, lalu ulangi langkah setup yang gagal/belum selesai."
+		return 0
+	fi
+	cmd_doctor --fix
+	say ""
+	cmd_setup_pending=""
+	for c in $COMPONENTS; do is_done "$c" || cmd_setup_pending="$cmd_setup_pending $c"; done
+	if [ -z "$cmd_setup_pending" ]; then
+		say "Semua komponen setup sudah selesai."
+		return 0
+	fi
+	info "melanjutkan setup:$cmd_setup_pending"
+	# shellcheck disable=SC2086  # daftar komponen sengaja di-split
+	cmd_setup $cmd_setup_pending
+}
+
+# ---------------------------------------------------------------- status / mount
+
+# ---------------------------------------------------------------- JSON (untuk WebUI)
+
+# Escape string untuk JSON: \ dan ", buang karakter kontrol.
+json_esc() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'
+}
+
+# true/false dari exit code perintah.
+json_bool() {
+	if "$@"; then printf true; else printf false; fi
+}
+
+# Baris pertama `<tool> --version` sebagai agent, atau null.
+json_version() {
+	jv=$(with_timeout 20 agent_run "$1" --version 2>/dev/null | head -n 1)
+	if [ -n "$jv" ]; then printf '"%s"' "$(json_esc "$jv")"; else printf null; fi
+}
+
+# `agentbox status --json [--versions]`. Tanpa --versions cepat (tanpa menjalankan apa pun di chroot);
+# dengan --versions ikut menjalankan claude/hermes --version (hermes ~5 detik) dan memastikan mount.
+status_json() {
+	sj_free=$(df -k /data 2>/dev/null | awk 'NR==2 {print int($4 / 1024)}')
+	sj_uid=null
+	ab_has_agent && sj_uid=$(grep "^$AGENT:" "$ROOTFS/etc/passwd" | cut -d: -f3)
+	case "$sj_uid" in "" | *[!0-9]*) sj_uid=null ;; esac
+	# Sumber kredensial Claude Code sesuai urutannya (tanpa cek jaringan; itu tugas `config auth-check`).
+	# wrong = token OAuth di ANTHROPIC_API_KEY (selalu ditolak, dan menutupi login).
+	if sj_v=$(env_get ANTHROPIC_API_KEY) && [ -n "$sj_v" ]; then
+		if [ "$(anth_kind "$sj_v")" = oauth ]; then sj_key="wrong"; else sj_key="env"; fi
+	elif sj_v=$(env_get CLAUDE_CODE_OAUTH_TOKEN) && [ -n "$sj_v" ]; then
+		sj_key="token"
+	elif claude_logged_in; then
+		sj_key="oauth"
+	else
+		sj_key="none"
+	fi
+	sj_v=""
+
+	printf '{"build":"%s","debug":%s,"arch":"%s","disk_free_mb":%s,' \
+		"$(json_esc "$AB_BUILD")" "$([ "$AB_DEBUG" = 1 ] && echo true || echo false)" \
+		"$(json_esc "$(uname -m)")" "${sj_free:-null}"
+	printf '"rootfs":%s,"mounts":%s,' "$(json_bool ab_rootfs_ok)" "$(grep -c " $ROOTFS/" /proc/mounts)"
+	printf '"agent":{"exists":%s,"uid":%s,"expected_uid":%s},' "$(json_bool ab_has_agent)" "$sj_uid" "$AGENT_UID"
+	printf '"components":{'
+	sj_sep=""
+	for c in $COMPONENTS; do
+		printf '%s"%s":%s' "$sj_sep" "$c" "$(json_bool is_done "$c")"
+		sj_sep=,
+	done
+	printf '},'
+
+	sj_cv=null
+	sj_hv=null
+	if [ "${1:-0}" = 1 ] && ab_rootfs_ok && ab_has_agent && ab_mount >/dev/null 2>&1; then
+		chroot_exists "$AGENT_HOME/.local/bin/claude" && sj_cv=$(json_version claude)
+		hermes_installed && sj_hv=$(json_version hermes)
+	fi
+	printf '"claude":{"installed":%s,"version":%s,"auth":"%s"},' \
+		"$(json_bool chroot_exists "$AGENT_HOME/.local/bin/claude")" "$sj_cv" "$sj_key"
+	printf '"hermes":{"installed":%s,"version":%s,"model_set":%s,"api_server":%s},' \
+		"$(json_bool hermes_installed)" "$sj_hv" "$(json_bool ab_hermes_model_set)" "$(hermes_api_json)"
+	sj_gw=$(gw status --json 2>/dev/null)
+	printf '"gateway":%s}\n' "${sj_gw:-null}"
+}
+
+# Variabel .env Hermes yang dianggap rahasia (ditampilkan tersamar).
+HERMES_SECRET_RE='(KEY|TOKEN|SECRET|PASSWORD)'
+
+# Variabel API key utama per provider Hermes (urutan pertama api_key_env_vars di
+# hermes_cli/auth.py _REGISTRY_ROWS; openrouter ditangani khusus oleh Hermes). Provider lain: kosong.
+hermes_provider_key() {
+	case "$1" in
+	anthropic) echo ANTHROPIC_API_KEY ;;
+	openrouter) echo OPENROUTER_API_KEY ;;
+	openai-api) echo OPENAI_API_KEY ;;
+	gemini) echo GOOGLE_API_KEY ;;
+	zai) echo GLM_API_KEY ;;
+	deepseek) echo DEEPSEEK_API_KEY ;;
+	xai) echo XAI_API_KEY ;;
+	esac
+}
+
+# Kunci .env Hermes yang boleh diubah dari WebUI: rahasia yang sudah terisi + kunci provider aktif.
+# Nama di luar daftar ini ditolak (tidak menulis variabel tebakan).
+hermes_key_editable() {
+	hk_pk=$(hermes_provider_key "$(ab_hermes_model_key provider)")
+	[ -n "$hk_pk" ] && [ "$1" = "$hk_pk" ] && return 0
+	printf '%s' "$1" | grep -Eq "$HERMES_SECRET_RE" || return 1
+	[ -n "$(ab_hermes_env_get "$1")" ]
+}
+
+# Baca satu nilai rahasia dari stdin (untuk WebUI: tanpa TTY). Hanya ASCII tercetak tanpa spasi.
+read_value_stdin() {
+	IFS= read -r rv_val || [ -n "$rv_val" ] || {
+		err "nilai kosong"
+		return 1
+	}
+	rv_len=${#rv_val}
+	if [ "$rv_len" -lt 1 ] || [ "$rv_len" -gt 4096 ]; then
+		err "panjang nilai tidak valid"
+		return 1
+	fi
+	case "$rv_val" in *[!!-~]*)
+		err "nilai hanya boleh karakter ASCII tercetak tanpa spasi"
+		return 1
+		;;
+	esac
+}
+
+# ---- Gateway API Server Hermes (untuk aplikasi klien, mis. hermes-android).
+# Platform di dalam `hermes gateway` (gateway/platforms/api_server.py): aktif bila API_SERVER_KEY >= 16
+# karakter, default bind 127.0.0.1:8642, setiap request wajib `Authorization: Bearer <kunci>`.
+
+hermes_api_host() {
+	ha_h=$(ab_hermes_env_get API_SERVER_HOST | tr -cd 'A-Za-z0-9.:_-')
+	echo "${ha_h:-127.0.0.1}"
+}
+
+hermes_api_port() {
+	ha_p=$(ab_hermes_env_get API_SERVER_PORT)
+	case "$ha_p" in "" | *[!0-9]*) ha_p=8642 ;; esac
+	echo "$ha_p"
+}
+
+hermes_api_enabled() {
+	ha_k=$(ab_hermes_env_get API_SERVER_KEY)
+	[ "${#ha_k}" -ge 16 ]
+}
+
+hermes_api_loopback() {
+	case "$(hermes_api_host)" in 127.* | localhost | ::1) return 0 ;; esac
+	return 1
+}
+
+# Port dalam keadaan LISTEN (0A) di /proc/net/tcp{,6}; chroot memakai network namespace yang sama.
+hermes_api_listening() {
+	ha_ph=$(printf '%04X' "$(hermes_api_port)")
+	grep -qE ":$ha_ph [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+hermes_api_json() {
+	printf '{"enabled":%s,"host":"%s","port":%s,"loopback":%s,"listening":%s}' \
+		"$(json_bool hermes_api_enabled)" "$(hermes_api_host)" "$(hermes_api_port)" \
+		"$(json_bool hermes_api_loopback)" "$(json_bool hermes_api_listening)"
+}
+
+# Kunci acak 32 byte (/dev/urandom) dalam base64 URL-safe tanpa padding: 43 karakter.
+hermes_api_new_key() {
+	"$BUSYBOX" head -c 32 /dev/urandom | "$BUSYBOX" base64 | tr -d '=\n' | tr '+/' '-_'
+}
+
+hermes_api_restart_gw() {
+	if gw_running; then
+		gw restart >/dev/null && say "gateway di-restart."
+	else
+		say "gateway sedang berhenti; API aktif setelah: agentbox service start"
+	fi
+}
+
+# `agentbox config hermes-api on|rotate|off|show|status [--json]`
+config_hermes_api() {
+	case "${1:-status}" in
+	on | rotate)
+		need_mount
+		hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
+		if [ "$1" = on ] && hermes_api_enabled; then
+			say "API Server sudah aktif (kunci yang ada tetap dipakai; ganti dengan: rotate)."
+		else
+			ha_key=$(hermes_api_new_key)
+			[ "${#ha_key}" -ge 40 ] || die "gagal membuat kunci acak"
+			# Kunci sampai ke argv proses hermes (uid agent, /proc hidepid); tidak pernah di-log.
+			with_timeout 60 agent_run hermes config set API_SERVER_KEY "$ha_key" >/dev/null 2>&1 ||
+				die "hermes config set API_SERVER_KEY gagal"
+			ha_key=""
+			root_run chown "$AGENT:$AGENT" "$AGENT_HOME/.hermes/.env" && root_run chmod 600 "$AGENT_HOME/.hermes/.env"
+			ab_log INFO "config: API Server Hermes $([ "$1" = rotate ] && echo "kunci diganti" || echo diaktifkan)"
+			say "Kunci API baru dibuat. Lihat dengan: agentbox config hermes-api show"
+			hermes_api_restart_gw
+		fi
+		say "Alamat: http://$(hermes_api_host):$(hermes_api_port)"
+		hermes_api_loopback || warn "API_SERVER_HOST bukan loopback: API bisa diakses dari jaringan."
+		;;
+	off)
+		need_mount
+		if hermes_api_enabled; then
+			with_timeout 60 agent_run hermes config unset API_SERVER_KEY >/dev/null 2>&1 ||
+				die "hermes config unset API_SERVER_KEY gagal"
+			root_run chmod 600 "$AGENT_HOME/.hermes/.env"
+			ab_log INFO "config: API Server Hermes dinonaktifkan"
+			hermes_api_restart_gw
+		fi
+		say "API Server nonaktif."
+		;;
+	show)
+		# Sengaja hanya atas permintaan eksplisit: dibutuhkan untuk diisi di aplikasi klien.
+		hermes_api_enabled || die "API Server belum aktif. Aktifkan dengan: agentbox config hermes-api on"
+		ab_hermes_env_get API_SERVER_KEY
+		;;
+	status)
+		if [ "${2:-}" = --json ]; then
+			hermes_api_json
+			echo
+		else
+			say "aktif      : $(hermes_api_enabled && echo ya || echo tidak)"
+			say "alamat     : http://$(hermes_api_host):$(hermes_api_port)"
+			say "mendengar  : $(hermes_api_listening && echo ya || echo tidak)"
+		fi
+		;;
+	*) die "pemakaian: agentbox config hermes-api on|rotate|off|show|status [--json]" ;;
+	esac
+}
+
+# ---- Kredensial Anthropic: sumber yang benar-benar dipakai + cek langsung ke API.
+# Cek memakai GET /v1/models (tanpa percakapan, tanpa biaya). Nilai kredensial hanya lewat file header
+# 600 (bukan argv) dan tidak pernah dicetak/di-log.
+
+ANTHROPIC_MODELS_URL=https://api.anthropic.com/v1/models
+CLAUDE_CREDS="$AGENT_HOME/.claude/.credentials.json"
+
+# Jenis kredensial dari awalannya (awalan tidak rahasia): oauth = sk-ant-oat…, api = sk-ant-api…
+anth_kind() {
+	case "$1" in
+	"") echo none ;;
+	sk-ant-oat*) echo oauth ;;
+	sk-ant-api*) echo api ;;
+	*) echo other ;;
+	esac
+}
+
+# Tolak token di variabel yang salah (penyebab umum 401). $1=tujuan (claude|hermes), $2=KEY, $3=nilai.
+anth_guard() {
+	case "$1:$2:$(anth_kind "$3")" in
+	claude:ANTHROPIC_API_KEY:oauth)
+		die "token OAuth (sk-ant-oat…) bukan API key. Simpan sebagai CLAUDE_CODE_OAUTH_TOKEN, atau login: claude auth login"
+		;;
+	claude:CLAUDE_CODE_OAUTH_TOKEN:api)
+		die "API key (sk-ant-api…) disimpan sebagai ANTHROPIC_API_KEY, bukan CLAUDE_CODE_OAUTH_TOKEN"
+		;;
+	hermes:ANTHROPIC_API_KEY:oauth)
+		die "token OAuth (sk-ant-oat…) untuk Hermes disimpan sebagai ANTHROPIC_TOKEN, bukan ANTHROPIC_API_KEY"
+		;;
+	hermes:ANTHROPIC_TOKEN:api)
+		die "API key (sk-ant-api…) untuk Hermes disimpan sebagai ANTHROPIC_API_KEY, bukan ANTHROPIC_TOKEN"
+		;;
+	esac
+}
+
+# Field string / angka dari ~/.claude/.credentials.json (JSON satu baris milik Claude Code).
+claude_cred_str() {
+	sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$ROOTFS$CLAUDE_CREDS" 2>/dev/null | head -n 1
+}
+claude_cred_num() {
+	sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p" "$ROOTFS$CLAUDE_CREDS" 2>/dev/null | head -n 1
+}
+claude_logged_in() {
+	[ -f "$ROOTFS$CLAUDE_CREDS" ] && [ -n "$(claude_cred_str refreshToken)$(claude_cred_str accessToken)" ]
+}
+
+# anth_probe <api|oauth> <nilai> -> ap_status valid|invalid|unknown|offline, ap_http
+anth_probe() {
+	ap_http=""
+	ap_status=unknown
+	command -v curl >/dev/null 2>&1 || return 0
+	ap_h="$AB_RUN/anth.hdr.$$"
+	mkdir -p "$AB_RUN"
+	(
+		umask 077
+		if [ "$1" = api ]; then
+			printf 'x-api-key: %s\n' "$2"
+		else
+			printf 'Authorization: Bearer %s\nanthropic-beta: oauth-2025-04-20\n' "$2"
+		fi
+	) >"$ap_h"
+	ap_http=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -H @"$ap_h" -H 'anthropic-version: 2023-06-01' \
+		"$ANTHROPIC_MODELS_URL" 2>/dev/null)
+	rm -f "$ap_h"
+	case "$ap_http" in
+	200) ap_status=valid ;;
+	401) ap_status=invalid ;;
+	"" | 000) ap_status=offline ;;
+	*) ap_status=unknown ;;
+	esac
+}
+
+# Cek satu sumber; hasil di variabel ac_*: source, kind, status, http.
+#   ac_check <nama-sumber> <nilai>         kredensial statis (env)
+#   ac_check login                         login Claude Code (~/.claude/.credentials.json)
+ac_check() {
+	ac_source=$1
+	ac_http=""
+	if [ "$1" = login ]; then
+		ac_kind=oauth
+		ac_exp=$(claude_cred_num expiresAt)
+		ac_now=$(date +%s)
+		if [ -n "$ac_exp" ] && [ "$((ac_exp / 1000))" -le "$ac_now" ] && [ -n "$(claude_cred_str refreshToken)" ]; then
+			# Access token kedaluwarsa tapi ada refresh token: diperbarui otomatis saat dipakai.
+			ac_status=refreshable
+			return 0
+		fi
+		anth_probe oauth "$(claude_cred_str accessToken)"
+	else
+		ac_kind=$(anth_kind "$2")
+		if [ "$ac_kind" = oauth ]; then anth_probe oauth "$2"; else anth_probe api "$2"; fi
+	fi
+	ac_status=$ap_status
+	ac_http=$ap_http
+}
+
+ac_json() {
+	printf '{"source":"%s","kind":"%s","status":"%s","http":"%s"}' "$ac_source" "$ac_kind" "$ac_status" "$ac_http"
+}
+
+# Claude Code: urutan sumber sama dengan Claude Code (variabel env didahulukan dari login).
+auth_check_claude() {
+	if v=$(env_get ANTHROPIC_API_KEY) && [ -n "$v" ]; then
+		ac_check env:ANTHROPIC_API_KEY "$v"
+		# Token OAuth di ANTHROPIC_API_KEY dikirim Claude Code sebagai x-api-key -> selalu ditolak.
+		[ "$ac_kind" = oauth ] && ac_status=wrong-var
+	elif v=$(env_get CLAUDE_CODE_OAUTH_TOKEN) && [ -n "$v" ]; then
+		ac_check env:CLAUDE_CODE_OAUTH_TOKEN "$v"
+	elif claude_logged_in; then
+		ac_check login
+	else
+		ac_source=none ac_kind=none ac_status=none ac_http=""
+	fi
+	v=""
+}
+
+# Hermes (provider anthropic): ANTHROPIC_API_KEY -> ANTHROPIC_TOKEN -> CLAUDE_CODE_OAUTH_TOKEN -> login Claude Code
+# (urutan api_key_env_vars di hermes_cli/auth.py, lalu credentials.json sebagai fallback).
+auth_check_hermes() {
+	ac_source=none ac_kind=none ac_status=none ac_http=""
+	for k in ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
+		v=$(ab_hermes_env_get "$k")
+		if [ -n "$v" ]; then
+			ac_check "hermes:$k" "$v"
+			v=""
+			return 0
+		fi
+	done
+	claude_logged_in && ac_check login
+}
+
+ac_text() {
+	case "$ac_status" in
+	valid) printf 'valid' ;;
+	invalid) printf 'DITOLAK Anthropic (HTTP 401)' ;;
+	wrong-var) printf 'SALAH TEMPAT: token OAuth di ANTHROPIC_API_KEY' ;;
+	refreshable) printf 'kedaluwarsa, diperbarui otomatis saat dipakai' ;;
+	offline) printf 'tidak bisa dicek (offline?)' ;;
+	none) printf 'belum ada' ;;
+	not-anthropic) printf 'tidak dicek (provider bukan anthropic)' ;;
+	*) printf 'tidak bisa dipastikan (HTTP %s)' "$ac_http" ;;
+	esac
+	[ "$ac_source" != none ] && printf ' [%s]' "$ac_source"
+}
+
+# `agentbox config auth-check [--json]`
+config_auth_check() {
+	auth_check_claude
+	cc_json=$(ac_json)
+	cc_text=$(ac_text)
+	h_prov=""
+	if hermes_installed; then
+		h_prov=$(ab_hermes_model_key provider)
+		if [ "$h_prov" = anthropic ]; then
+			auth_check_hermes
+		else
+			ac_source=none ac_kind=none ac_status=not-anthropic ac_http=""
+		fi
+		h_json=$(ac_json)
+		h_text=$(ac_text)
+	fi
+	if [ "${1:-}" = --json ]; then
+		printf '{"claude":%s,"claude_login":%s' "$cc_json" "$(json_bool claude_logged_in)"
+		if hermes_installed; then printf ',"hermes":%s,"hermes_provider":"%s"' "$h_json" "$h_prov"; fi
+		printf '}\n'
+	else
+		say "Claude Code : $cc_text"
+		hermes_installed && say "Hermes      : $h_text (provider ${h_prov:-?})"
+	fi
+}
+
+# `agentbox config hermes-link-claude`: Hermes memakai login Claude Code (diperbarui otomatis) dengan
+# mengosongkan slot token Anthropic di ~/.hermes/.env (sama dengan use_anthropic_claude_code_credentials
+# di Hermes). Gateway yang berjalan di-restart.
+config_hermes_link_claude() {
+	need_mount
+	hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
+	claude_logged_in || die "Claude Code belum login di chroot. Login dulu: Terminal → login Claude Code (claude auth login)"
+	for k in ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
+		[ -n "$(ab_hermes_env_get "$k")" ] || continue
+		with_timeout 60 agent_run hermes config unset "$k" >/dev/null 2>&1 || die "hermes config unset $k gagal"
+		say "$k dikosongkan di ~/.hermes/.env"
+	done
+	root_run chmod 600 "$AGENT_HOME/.hermes/.env"
+	ab_log INFO "config: Hermes memakai login Claude Code"
+	say "Hermes sekarang memakai login Claude Code (~/.claude/.credentials.json, diperbarui otomatis)."
+	if gw_running; then
+		gw restart >/dev/null && say "gateway di-restart."
+	fi
+}
+
+# `agentbox config hermes-key KEY --stdin`: ganti/isi API key/token Hermes lewat `hermes config set`
+# (Hermes sendiri yang menentukan cara menyimpannya ke ~/.hermes/.env). Gateway berjalan di-restart.
+config_hermes_key() {
+	valid_key "$1" || die "nama variabel tidak valid: $1"
+	need_mount
+	hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
+	hermes_key_editable "$1" || die "$1 tidak bisa diubah dari sini (bukan kunci provider aktif atau rahasia yang sudah ada)"
+	read_value_stdin || exit 1
+	anth_guard hermes "$1" "$rv_val"
+	# Nilai sampai ke argv proses hermes (uid agent); /proc Android memakai hidepid, aplikasi lain tidak
+	# bisa membacanya. Tidak pernah di-log.
+	if ! with_timeout 60 agent_run hermes config set "$1" "$rv_val" >/dev/null 2>&1; then
+		die "hermes config set $1 gagal"
+	fi
+	rv_val=""
+	gk_env="$AGENT_HOME/.hermes/.env"
+	root_run chown "$AGENT:$AGENT" "$gk_env" && root_run chmod 600 "$gk_env"
+	ab_log INFO "config: kunci Hermes $1 diubah"
+	say "$1 disimpan."
+	if gw_running; then
+		gw restart >/dev/null && say "gateway di-restart agar memakai kunci baru."
+	fi
+}
+
+# `agentbox config show --json`: config/env agentbox + ringkasan konfigurasi Hermes. Semua nilai rahasia
+# hanya keluar dalam bentuk tersamar (mask), tidak pernah mentah.
+config_show_json() {
+	printf '{"env":['
+	cj_sep=""
+	if [ -f "$AB_ENV" ]; then
+		# shellcheck disable=SC2013  # nama variabel, satu kata per baris
+		for k in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$AB_ENV"); do
+			v=$(env_get "$k") || v=""
+			printf '%s{"key":"%s","masked":"%s","kind":"%s"}' "$cj_sep" "$k" "$(json_esc "$(mask "$v")")" "$(anth_kind "$v")"
+			cj_sep=,
+		done
+	fi
+	# Login Claude Code di chroot (bukan rahasia: ada/tidak, jenis langganan, kedaluwarsa access token).
+	cj_sub=$(claude_cred_str subscriptionType | tr -cd 'A-Za-z0-9_-')
+	cj_exp=$(claude_cred_num expiresAt)
+	printf '],"claude_login":{"logged_in":%s,"subscription":"%s","expires_at":%s}' \
+		"$(json_bool claude_logged_in)" "$cj_sub" "${cj_exp:-null}"
+	printf ',"hermes":{"installed":%s' "$(json_bool hermes_installed)"
+	if hermes_installed; then
+		printf ',"provider":"%s","model":"%s","model_set":%s' \
+			"$(ab_hermes_model_key provider)" "$(ab_hermes_model_key default)" "$(json_bool ab_hermes_model_set)"
+		cj_pk=$(hermes_provider_key "$(ab_hermes_model_key provider)")
+		printf ',"provider_key":"%s","provider_key_set":%s' "$cj_pk" \
+			"$([ -n "$cj_pk" ] && [ -n "$(ab_hermes_env_get "$cj_pk")" ] && echo true || echo false)"
+		printf ',"secrets":['
+		cj_sep=""
+		cj_envf="$ROOTFS$AGENT_HOME/.hermes/.env"
+		if [ -f "$cj_envf" ]; then
+			# shellcheck disable=SC2013  # nama variabel, satu kata per baris
+			for k in $(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$cj_envf" | grep -E "$HERMES_SECRET_RE" | sort -u); do
+				v=$(ab_hermes_env_get "$k")
+				[ -n "$v" ] || continue
+				printf '%s{"key":"%s","masked":"%s","kind":"%s"}' "$cj_sep" "$k" "$(json_esc "$(mask "$v")")" "$(anth_kind "$v")"
+				cj_sep=,
+			done
+		fi
+		cj_users=$(ab_hermes_env_get TELEGRAM_ALLOWED_USERS | tr ',' '\n' | grep -c '[0-9]')
+		printf '],"telegram":{"configured":%s,"allowed_users":%s,"home_channel":%s}' \
+			"$([ -n "$(ab_hermes_env_get TELEGRAM_BOT_TOKEN)" ] && echo true || echo false)" \
+			"${cj_users:-0}" \
+			"$([ -n "$(ab_hermes_env_get TELEGRAM_HOME_CHANNEL)" ] && echo true || echo false)"
+		printf ',"gateway_configured":%s' "$(json_bool is_done gateway)"
+		printf ',"api_server":%s' "$(hermes_api_json)"
+	fi
+	printf '}}\n'
+}
+
+cmd_status() {
+	st_json=0
+	st_ver=0
+	for a in "$@"; do
+		case "$a" in
+		-h | --help)
+			say "Pemakaian: agentbox status [--json [--versions]]"
+			say "Ringkasan: rootfs, mount, versi tool, status service."
+			say "--json      keluaran JSON (dipakai WebUI); --versions ikut menjalankan claude/hermes --version"
+			return 0
+			;;
+		--json) st_json=1 ;;
+		--versions) st_ver=1 ;;
+		*) die "opsi tidak dikenal: $a" ;;
+		esac
+	done
+	if [ "$st_json" = 1 ]; then
+		status_json "$st_ver"
+		return 0
+	fi
+	if ab_rootfs_ok; then st_r="ada ($ROOTFS)"; else st_r="TIDAK ADA"; fi
+	st_m=$(grep -c " $ROOTFS/" /proc/mounts)
+	say "rootfs     : $st_r"
+	say "mount      : $st_m aktif"
+	st_done=""
+	for c in $COMPONENTS; do is_done "$c" && st_done="$st_done $c"; done
+	say "setup      :${st_done:- (belum ada)}"
+	if [ "$AB_DEBUG" = 1 ]; then st_dbg="aktif ($AB_DEBUG_LOG)"; else st_dbg="mati"; fi
+	say "build      : $AB_BUILD, log debug $st_dbg"
+	if ab_rootfs_ok && ab_is_mounted "$ROOTFS/proc" && ab_has_agent && chroot_exists /usr/bin/setpriv; then
+		chroot_exists "$AGENT_HOME/.local/bin/claude" &&
+			say "claude     : $(with_timeout 20 agent_run claude --version 2>/dev/null | head -n1)"
+		hermes_installed &&
+			say "hermes     : $(with_timeout 20 agent_run hermes --version 2>/dev/null | head -n1)"
+	fi
+	say "--- gateway ---"
+	gw status
+}
+
+cmd_mount() {
+	if wants_help "$@"; then
+		say "Pemakaian: agentbox mount"
+		say "Bind mount /dev, /dev/pts, /proc, /sys, /data/media/0 (sebagai /sdcard) dan tmpfs /dev/shm ke rootfs (idempoten)."
+		return 0
+	fi
+	need_rootfs
+	ab_mount || die "mount gagal"
+	say "Mount aktif."
+}
+
+cmd_umount() {
+	um_force=0
+	case "${1:-}" in
+	-h | --help)
+		say "Pemakaian: agentbox umount [--force]"
+		say "Lepas semua mount rootfs. Ditolak bila gateway/proses lain memakai chroot;"
+		say "--force menghentikan gateway lebih dulu."
+		return 0
+		;;
+	--force) um_force=1 ;;
+	esac
+	if gw_running; then
+		[ "$um_force" = 1 ] || die "gateway masih berjalan. Hentikan dulu (agentbox service stop) atau pakai --force"
+		gw stop
+	fi
+	ab_chroot_busy && die "masih ada proses di dalam chroot (shell/claude). Tutup dulu."
+	ab_umount || die "umount tidak bersih; cek: grep $ROOTFS /proc/mounts"
+	say "Semua mount dilepas."
+}
+
+# ---------------------------------------------------------------- backup / reset
+
+cmd_backup() {
+	if wants_help "$@"; then
+		say "Pemakaian: agentbox backup"
+		say "Arsipkan $AGENT_HOME ke $AB_BACKUP/ (tanpa cache dan runtime yang bisa diunduh ulang)."
+		return 0
+	fi
+	[ -d "$ROOTFS$AGENT_HOME" ] || die "$AGENT_HOME tidak ada di rootfs"
+	mkdir -p "$AB_BACKUP"
+	chmod 700 "$AB_BACKUP"
+	bk_file="$AB_BACKUP/home-agent-$(date +%Y%m%d-%H%M%S).tar.gz"
+	bk_ex="$AB_RUN/backup.exclude"
+	mkdir -p "$AB_RUN"
+	cat >"$bk_ex" <<EOF
+agent/.cache
+agent/.npm
+agent/.local/share/claude
+agent/.local/share/uv
+agent/.hermes/hermes-agent
+agent/.hermes/tools
+EOF
+	info "membuat $bk_file"
+	if (umask 077 && "$BUSYBOX" tar -czf "$bk_file" -X "$bk_ex" -C "$ROOTFS/home" agent); then
+		rm -f "$bk_ex"
+		say "Backup selesai: $bk_file ($(du -h "$bk_file" | cut -f1))"
+	else
+		rm -f "$bk_ex" "$bk_file"
+		die "backup gagal"
+	fi
+}
+
+cmd_reset() {
+	rs_yes=0
+	case "${1:-}" in
+	-h | --help)
+		say "Pemakaian: agentbox reset [--yes]"
+		say "DESTRUKTIF: hapus rootfs lalu bangun ulang. Config ($AB_CONFIG) dan backup tetap disimpan."
+		say "Butuh konfirmasi ketik RESET; tanpa terminal hanya jalan dengan --yes."
+		return 0
+		;;
+	--yes) rs_yes=1 ;;
+	"") ;;
+	*) die "opsi tidak dikenal: $1" ;;
+	esac
+
+	if has_tty && [ "$rs_yes" = 0 ]; then
+		warn "reset akan MENGHAPUS seluruh rootfs termasuk $AGENT_HOME."
+		if [ -d "$ROOTFS$AGENT_HOME" ]; then
+			ask "Backup $AGENT_HOME dulu? [Y/n] "
+			case "$ask_ans" in n | N | no) ;; *) cmd_backup || die "backup gagal, reset dibatalkan" ;; esac
+		fi
+		ask "Ketik RESET untuk melanjutkan: "
+		[ "$ask_ans" = RESET ] || die "dibatalkan"
+	elif [ "$rs_yes" = 0 ]; then
+		die "reset butuh konfirmasi di terminal, atau jalankan dengan --yes"
+	fi
+
+	ab_log WARN "reset dimulai"
+	info "menghentikan gateway"
+	gw stop
+	info "umount + verifikasi"
+	ab_umount || die "masih ada mount di bawah $ROOTFS, reset DIBATALKAN"
+	if grep -q " ${ROOTFS}[ /]" /proc/mounts; then die "mount tersisa di $ROOTFS, reset DIBATALKAN"; fi
+	ab_chroot_busy && die "masih ada proses di dalam chroot, tutup dulu. Reset DIBATALKAN"
+	for d in sdcard proc sys dev/pts; do
+		if [ -d "$ROOTFS/$d" ] && [ -n "$(ls -A "$ROOTFS/$d" 2>/dev/null)" ]; then
+			die "$ROOTFS/$d tidak kosong (mount belum lepas?), reset DIBATALKAN"
+		fi
+	done
+	ab_path_safe "$ROOTFS" || die "path rootfs tidak aman: '$ROOTFS'"
+
+	info "menghapus $ROOTFS"
+	rm -rf "$ROOTFS" || die "gagal menghapus rootfs"
+	rm -f "$AB_STATE"/*.done
+	ab_log WARN "rootfs dihapus, membangun ulang"
+	say ""
+	cmd_setup
+}
+
+# ---------------------------------------------------------------- service
+
+cmd_service() {
+	case "${1:-}" in
+	"" | -h | --help)
+		say "Pemakaian: agentbox service <start|stop|restart|status [--json]|log [n]|autostart on|off>"
+		say "Kontrol Hermes messaging gateway (delegasi ke lib/gateway.sh)."
+		return 0
+		;;
+	esac
+	gw "$@"
+}
+
+# ---------------------------------------------------------------- main
+
+usage() {
+	cat <<EOF
+agentbox: Claude Code + Hermes Agent di chroot Void Linux
+
+Pemakaian: agentbox <perintah> [opsi]   (setiap perintah punya --help)
+
+  shell [--root|--safe]   masuk chroot (default sebagai agent)
+  exec <cmd...>           jalankan satu perintah sebagai root di chroot
+  setup [komponen...]     setup modular: $COMPONENTS
+  config                  API key dan konfigurasi Hermes / gateway
+  doctor [--fix]          diagnosis lingkungan
+  repair                  doctor --fix lalu lanjutkan setup yang belum selesai
+  install <pkg...>        xbps-install di chroot
+  update                  update rootfs, Claude Code, Hermes
+  service <aksi>          start|stop|restart|status|log|autostart on|off
+  status                  ringkasan rootfs, mount, versi, service
+  mount | umount          kelola bind mount
+  backup                  arsipkan $AGENT_HOME ke $AB_BACKUP
+  reset                   hapus dan bangun ulang rootfs (destruktif)
+EOF
+}
+
+mkdir -p "$AB_LOGS" "$AB_STATE" "$AB_RUN" "$AB_CONFIG" 2>/dev/null
+ab_debug_rotate
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+"" | -h | --help | help) usage ;;
+shell) cmd_shell "$@" ;;
+exec) cmd_exec "$@" ;;
+setup) cmd_setup "$@" ;;
+config) cmd_config "$@" ;;
+doctor) cmd_doctor "$@" ;;
+repair) cmd_repair "$@" ;;
+install) cmd_install "$@" ;;
+update) cmd_update "$@" ;;
+service) cmd_service "$@" ;;
+status) cmd_status "$@" ;;
+mount) cmd_mount "$@" ;;
+umount) cmd_umount "$@" ;;
+backup) cmd_backup "$@" ;;
+reset) cmd_reset "$@" ;;
+*)
+	err "perintah tidak dikenal: $cmd"
+	usage >&2
+	exit 1
+	;;
+esac
