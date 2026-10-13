@@ -942,7 +942,10 @@ cmd_config() {
 		fi
 		config_hermes_key "$2"
 		;;
-	cron) /system/bin/sh "$MODDIR/lib/cron.sh" "${2:-}" "${@:3}" ;;
+	cron)
+		shift
+		/system/bin/sh "$MODDIR/lib/cron.sh" "$@"
+		;;
 	*) die "subperintah config tidak dikenal: $1 (lihat agentbox config --help)" ;;
 	esac
 }

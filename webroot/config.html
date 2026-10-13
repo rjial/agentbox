@@ -30,6 +30,34 @@
   .editor .btn.danger { color: var(--err); border-color: var(--err); margin-left: auto; }
   .warn { color: var(--wait); }
   .err-text { color: var(--err); }
+  /* Form cron */
+  .form { display: grid; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .field { display: grid; gap: 4px; }
+  .field-label { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .field-label .count { font-weight: 400; font-variant-numeric: tabular-nums; }
+  .field-hint { font-size: 12px; }
+  .form input, .form select, .form textarea {
+    width: 100%; font: 15px/1.4 system-ui, -apple-system, "Roboto", sans-serif; color: var(--ink);
+    background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 44px;
+  }
+  .form textarea { resize: vertical; min-height: 96px; }
+  .form .mono { font: 14px ui-monospace, "Roboto Mono", monospace; }
+  .form input.bad { border-color: var(--err); }
+  .form input:focus, .form select:focus, .form textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .form .msg { font-size: 13px; margin: 0; white-space: pre-wrap; }
+  .form .btn-row { margin-top: 0; }
+  .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .examples .ex {
+    font: 12px ui-monospace, "Roboto Mono", monospace; color: var(--accent); background: transparent;
+    border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; cursor: pointer;
+  }
+  .items.cron li { gap: 8px; }
+  .btn.small-btn { min-height: 34px; padding: 6px 12px; }
+  .cli-out {
+    margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--paper);
+    font: 12px/1.45 ui-monospace, "Roboto Mono", monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .cli-out.err { color: var(--err); }
   .auth { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font-size: 14px; color: var(--muted); }
 </style>
 </head>
@@ -307,8 +335,7 @@
         <${Note}>Klien chat <code>rusty4444/hermes-android</code> terhubung ke Gateway API Server Hermes di HP ini
           (hanya 127.0.0.1, wajib API key). Kunci memberi kendali penuh atas Hermes: simpan hanya di aplikasi itu, dan
           ganti bila bocor. Dashboard (port 9119: Memory, Skills) sengaja tidak diaktifkan, karena di loopback
-          ia tanpa login dan bisa diambil alih aplikasi lain. Cron tetap bisa diatur di halaman Konfigurasi
-          tanpa dashboard.<//>
+          ia tanpa login dan bisa diambil alih aplikasi lain. Cron diatur di kartu Cron job di bawah.<//>
       </section>`;
   }
 
@@ -319,54 +346,97 @@
   const CRON_NAME_RE = /^[A-Za-z0-9_-]{1,40}$/;
   const CRON_MAX_PROMPT = 8192;
   const DELIVER_OPTS = [
-    ["local", "local — simpan saja"],
-    ["all", "all — semua channel"],
-    ["origin", "origin — asal dibuat"],
-    ["telegram", "telegram"],
-    ["discord", "discord"],
-    ["signal", "signal"],
+    ["local", "Simpan saja (local)"],
+    ["origin", "Asal job dibuat (origin)"],
+    ["all", "Semua channel (all)"],
+    ["telegram", "Telegram"],
+    ["discord", "Discord"],
+    ["signal", "Signal"],
   ];
+  const SCHED_EXAMPLES = ["0 7 * * *", "every monday 9am", "30m"];
+  const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 
-  function CronCard() {
-    const [data, setData] = useState(undefined);   // undefined = memuat, null = gagal
+  function CronForm({ busy, onSubmit, onCancel }) {
     const [name, setName] = useState("");
     const [sched, setSched] = useState("");
     const [deliver, setDeliver] = useState("local");
     const [prompt, setPrompt] = useState("");
+    const [err, setErr] = useState("");
+    const nameRef = useRef(null);
+    useEffect(() => { if (nameRef.current) nameRef.current.focus(); }, []);
+
+    const nameBad = name.length > 0 && !CRON_NAME_RE.test(name);
+    const submit = async () => {
+      if (!CRON_NAME_RE.test(name)) { setErr("Nama hanya boleh A-Z a-z 0-9 _ - (maks. 40)."); return; }
+      if (!sched.trim()) { setErr("Jadwal belum diisi."); return; }
+      if (!prompt.trim()) { setErr("Prompt belum diisi."); return; }
+      if (prompt.length > CRON_MAX_PROMPT) { setErr(`Prompt terlalu panjang (${prompt.length}/${CRON_MAX_PROMPT}).`); return; }
+      setErr("");
+      const e = await onSubmit({ name, sched: sched.trim(), deliver, prompt });
+      if (e) setErr(e);
+    };
+
+    return html`
+      <div class="form">
+        <label class="field"><span class="field-label">Nama</span>
+          <input ref=${nameRef} type="text" class=${nameBad ? "bad" : ""} value=${name} placeholder="ringkasan-pagi"
+            autocapitalize="off" autocomplete="off" spellcheck=${false} maxlength="40"
+            onInput=${(e) => setName(e.target.value)} />
+          ${nameBad && html`<span class="field-hint err-text">Hanya A-Z a-z 0-9 _ - (maks. 40).</span>`}</label>
+        <label class="field"><span class="field-label">Jadwal</span>
+          <input type="text" class="mono" value=${sched} placeholder="0 7 * * *"
+            autocapitalize="off" autocomplete="off" spellcheck=${false}
+            onInput=${(e) => setSched(e.target.value)} />
+          <span class="examples">Contoh:
+            ${SCHED_EXAMPLES.map((x) => html`<button type="button" key=${x} class="ex" onClick=${() => setSched(x)}>${x}</button>`)}
+          </span></label>
+        <label class="field"><span class="field-label">Kirim hasil ke</span>
+          <select value=${deliver} onChange=${(e) => setDeliver(e.target.value)}>
+            ${DELIVER_OPTS.map(([v, t]) => html`<option key=${v} value=${v}>${t}</option>`)}
+          </select></label>
+        <label class="field"><span class="field-label">Prompt
+            <span class="count">${prompt.length}/${CRON_MAX_PROMPT}</span></span>
+          <textarea rows="4" value=${prompt}
+            placeholder="Instruksi lengkap. Job berjalan di sesi baru, tanpa konteks chat."
+            onInput=${(e) => setPrompt(e.target.value)}></textarea></label>
+        ${err && html`<p class="msg err-text">${err}</p>`}
+        <div class="btn-row">
+          <button class="btn primary" disabled=${busy} onClick=${submit}>${busy ? "Menyimpan… (bisa ~10 detik)" : "Simpan job"}</button>
+          <button class="btn" disabled=${busy} onClick=${onCancel}>Batal</button>
+        </div>
+      </div>`;
+  }
+
+  function CronCard() {
+    const [data, setData] = useState(undefined);   // undefined = memuat, null = gagal
+    const [adding, setAdding] = useState(false);
     const [busy, setBusy] = useState(false);
-    const [msg, setMsg] = useState(null);           // { err, text }
+    const [msg, setMsg] = useState(null);           // { err, text } keluaran CLI terakhir
 
     const load = useCallback(async () => {
       const d = await cliJson(`config cron list --json`);
-      setData(d && Array.isArray(d.declared) ? d : null);
+      setData(d && Array.isArray(d.declared) ? d.declared : null);
     }, []);
     useEffect(() => { load(); }, [load]);
 
-    const nameBad = name.length > 0 && !CRON_NAME_RE.test(name);
-
-    const add = async () => {
-      if (!CRON_NAME_RE.test(name)) { setMsg({ err: true, text: "Nama tidak valid: hanya A-Z a-z 0-9 _ -, maksimal 40." }); return; }
-      if (!sched.trim()) { setMsg({ err: true, text: "Jadwal belum diisi." }); return; }
-      if (!prompt.trim()) { setMsg({ err: true, text: "Prompt belum diisi." }); return; }
-      if (prompt.length > CRON_MAX_PROMPT) { setMsg({ err: true, text: `Prompt terlalu panjang (${prompt.length}/${CRON_MAX_PROMPT}).` }); return; }
+    const add = async ({ name, sched, deliver, prompt }) => {
       setBusy(true); setMsg(null);
-      const arg = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
-      const cmd = `printf '%s' '${b64(prompt)}' | ${BB} base64 -d | ${CLI} config cron add ${arg(name)} ${arg(sched)} --deliver ${arg(deliver)} --prompt-stdin`;
-      const r = await run(cmd);
+      const r = await run(`printf '%s' '${b64(prompt)}' | ${BB} base64 -d | ${CLI} config cron add ${shq(name)} ${shq(sched)} --deliver ${shq(deliver)} --prompt-stdin`);
       setBusy(false);
-      if (r.errno !== 0) { setMsg({ err: true, text: stripAnsi(r.stderr || r.stdout) || "Gagal membuat job." }); return; }
-      setName(""); setSched(""); setPrompt("");
-      setMsg({ err: false, text: "Job dibuat." });
-      load();
+      load();   // deklarasi bisa tersimpan walau job gagal dibuat di Hermes
+      if (r.errno !== 0) return stripAnsi(r.stderr || r.stdout) || "Gagal membuat job.";
+      setAdding(false);
+      toast(`Job ${name} dibuat`);
+      return "";
     };
 
     const remove = async (n) => {
       setBusy(true); setMsg(null);
-      const arg = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
-      const r = await run(`${CLI} config cron remove ${arg(n)}`);
+      const r = await run(`${CLI} config cron remove ${shq(n)}`);
       setBusy(false);
-      if (r.errno !== 0) { setMsg({ err: true, text: stripAnsi(r.stderr || r.stdout) || "Gagal menghapus." }); return; }
-      setMsg({ err: false, text: "Deklarasi dihapus." });
+      const out = stripAnsi(r.errno === 0 ? r.stdout : r.stderr || r.stdout);
+      if (r.errno === 0 && !/CATATAN/.test(out)) toast(`Job ${n} dihapus`);
+      else setMsg({ err: r.errno !== 0, text: out || "Gagal menghapus." });
       load();
     };
 
@@ -374,52 +444,42 @@
       setBusy(true); setMsg(null);
       const r = await run(`${CLI} config cron sync`);
       setBusy(false);
-      setMsg({ err: r.errno !== 0, text: stripAnsi(r.stdout || r.stderr) || "Selesai." });
+      setMsg({ err: r.errno !== 0, text: stripAnsi(r.stdout + "\n" + r.stderr) || "Selesai." });
       load();
     };
 
+    const pending = Array.isArray(data) ? data.filter((j) => !j.in_hermes).length : 0;
     return html`
       <section class="card"><h2>Cron job</h2>
         ${data === undefined
           ? html`<p class="muted">Memuat…</p>`
           : data === null
-            ? html`<${Note}>Tidak bisa membaca daftar cron.<//>`
+            ? html`<p class="muted">Tidak bisa membaca daftar cron.</p>`
             : data.length === 0
-              ? html`<${Note}>Belum ada cron job deklaratif.<//>`
-              : html`<ul class="items">
+              ? !adding && html`<p class="muted small">Belum ada job. Hermes bisa menjalankan prompt sesuai jadwal dan
+                  mengirim hasilnya ke Telegram atau channel lain.</p>`
+              : html`<ul class="items cron">
                   ${data.map((j) => html`
-                    <li key=${j.name}><div class="txt">
-                      <p class="name">${j.name}</p>
-                      <p class="sub"><code>${j.schedule}</code> → ${j.deliver}</p>
-                    </div>
-                    <${Chip} cls=${j.in_hermes ? "ok" : "todo"}>${j.in_hermes ? "aktif" : "belum"}<//>
-                    <button class="btn" disabled=${busy} onClick=${() => remove(j.name)}>Hapus</button></li>`)}
+                    <li key=${j.name}>
+                      <div class="txt">
+                        <p class="name">${j.name}</p>
+                        <p class="sub"><code>${j.schedule}</code> · ${j.deliver || "local"}</p>
+                      </div>
+                      <${Chip} cls=${j.in_hermes ? "ok" : "todo"}>${j.in_hermes ? "aktif" : "belum diterapkan"}<//>
+                      <${ConfirmButton} cls="btn small-btn" disabled=${busy} confirmText="Yakin?"
+                        onConfirm=${() => remove(j.name)}>Hapus<//>
+                    </li>`)}
                 </ul>`}
-        <div class="field"><label class="field-label" for="cron-name">Nama</label>
-          <input class="field-input" id="cron-name" value=${name} placeholder="backup-harian"
-            onInput=${(e) => setName(e.target.value)} /></div>
-        ${nameBad && html`<p class="note err-text">Nama hanya boleh A-Z a-z 0-9 _ - (maks 40).</p>`}
-        <div class="field"><label class="field-label" for="cron-sched">Jadwal</label>
-          <input class="field-input" id="cron-sched" value=${sched} placeholder="0 3 * * *  |  every monday 9am  |  30m"
-            onInput=${(e) => setSched(e.target.value)} /></div>
-        <div class="field"><label class="field-label" for="cron-deliver">Kirim ke</label>
-          <select class="field-input" id="cron-deliver" value=${deliver}
-            onChange=${(e) => setDeliver(e.target.value)}>
-            ${DELIVER_OPTS.map(([v, t]) => html`<option key=${v} value=${v}>${t}</option>`)}
-          </select></div>
-        <div class="field"><label class="field-label" for="cron-prompt">Prompt</label>
-          <textarea class="field-input" id="cron-prompt" rows="3" value=${prompt}
-            placeholder="Instruksi mandiri. Job berjalan di sesi baru, tanpa konteks chat."
-            onInput=${(e) => setPrompt(e.target.value)}></textarea></div>
-        ${msg && html`<p class=${msg.err ? "note err-text" : "note"}>${msg.text}</p>`}
-        <div class="btn-row">
-          <button class="btn primary" disabled=${busy} onClick=${add}>
-            ${busy ? "Memproses…" : "Tambah job"}</button>
-          <button class="btn" disabled=${busy} onClick=${sync}>Terapkan semua</button>
-        </div>
-        <${Note}>Prompt harus mandiri: job berjalan di sesi baru tanpa konteks percakapan ini, dan hasil akhirnya
-          baru dikirim bila <code>--deliver</code> menunjuk channel yang terhubung. Job yang dijadwal ulang tiap boot
-          aman: yang sudah ada tidak diubah, jadi status pause manual tetap.<//>
+        ${msg && html`<pre class=${"cli-out" + (msg.err ? " err" : "")}>${msg.text}</pre>`}
+        ${adding
+          ? html`<${CronForm} busy=${busy} onSubmit=${add} onCancel=${() => setAdding(false)} />`
+          : html`<div class="btn-row">
+              <button class="btn primary" disabled=${busy || data === null} onClick=${() => { setMsg(null); setAdding(true); }}>Tambah job</button>
+              ${pending > 0 && html`<button class="btn" disabled=${busy} onClick=${sync}>
+                ${busy ? "Menerapkan…" : `Terapkan ${pending} job ke Hermes`}</button>`}
+            </div>`}
+        <${Note}>Deklarasi disimpan di <code>config/cron.d</code> dan diterapkan ulang tiap boot; job yang sudah ada
+          (termasuk yang di-pause) tidak diubah. Menghapus di sini hanya menghapus deklarasi, bukan job di Hermes.<//>
       </section>`;
   }
 
