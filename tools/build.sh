@@ -54,7 +54,7 @@ if [ "$debug" = 1 ]; then
 fi
 find "$stage" -type f -exec chmod 644 {} +
 find "$stage" -type d -exec chmod 755 {} +
-chmod 755 "$stage"/*.sh "$stage"/system/bin/* "$stage"/lib/gateway.sh "$stage"/lib/tty.sh "$stage"/rootfs-setup/setup.sh
+chmod 755 "$stage"/*.sh "$stage"/system/bin/* "$stage"/lib/gateway.sh "$stage"/lib/tty.sh "$stage"/lib/cron.sh "$stage"/rootfs-setup/setup.sh
 
 mkdir -p "$root/dist"
 out="$root/dist/agentbox-$version-$type.zip"
