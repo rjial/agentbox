@@ -2,9 +2,10 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>agentbox · Status</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>agentbox</title>
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="vendor/xterm.css">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -16,46 +17,221 @@
   }
   a { color: var(--accent); }
   .refresh { background: none; border: 0; color: var(--accent); font: 600 14px system-ui, sans-serif; padding: 6px 0; cursor: pointer; }
+  .bnav .ico { display: contents; }
+  .stamp { font-size: 12px; color: var(--muted); }
+
+  /* ---- Gateway. Semua di bawah .gw: satu dokumen, jadi gaya halaman tidak boleh bocor ke halaman lain. */
+  .gw .status {
+    --state: var(--stop);
+    border-left: 8px solid var(--state);
+    background: var(--surface);
+    border-radius: 4px 14px 14px 4px;
+    padding: 20px 20px 18px;
+    transition: border-color .3s ease;
+  }
+  .gw .status[data-state="running"] { --state: var(--run); }
+  .gw .status[data-state="restarting"] { --state: var(--wait); }
+  .gw .status[data-state="error"] { --state: var(--err); }
+  .gw .status-name { font-size: 15px; color: var(--muted); margin: 0; }
+  .gw .status-word {
+    font-size: 40px; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em;
+    color: var(--state); margin: 2px 0 6px;
+    transition: color .3s ease;
+  }
+  .gw .status-detail { margin: 0; color: var(--muted); font-size: 14px; min-height: 21px; }
+  .gw .actions { display: flex; gap: 10px; margin-top: 16px; }
+  .gw button {
+    font: inherit; font-weight: 600; border-radius: 10px; padding: 12px 16px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    cursor: pointer; min-height: 48px;
+  }
+  .gw button.primary { flex: 1; background: var(--accent); border-color: var(--accent); color: var(--paper); }
+  .gw button:disabled { opacity: .5; cursor: default; }
+  .gw button:focus-visible, .gw input:focus-visible + .track { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .gw .notice {
+    margin-top: 12px; padding: 12px 14px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--err); color: var(--ink); font-size: 14px;
+  }
+  .gw .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    margin-top: 16px; padding: 14px 16px; background: var(--surface); border-radius: 12px;
+  }
+  .gw .row p { margin: 0; }
+  .gw .row .hint { color: var(--muted); font-size: 14px; }
+  .gw .switch { position: relative; flex: none; }
+  .gw .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .gw .track {
+    display: block; width: 52px; height: 32px; border-radius: 16px;
+    background: var(--line); transition: background .2s ease;
+  }
+  .gw .track::after {
+    content: ""; position: absolute; top: 4px; left: 4px; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--surface); transition: transform .2s ease;
+  }
+  .gw .switch input:checked + .track { background: var(--run); }
+  .gw .switch input:checked + .track::after { transform: translateX(20px); }
+  .gw .switch input:disabled + .track { opacity: .5; }
+  .gw section.log { margin-top: 24px; }
+  .gw .log-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .gw .log-head h2 { font-size: 17px; margin: 0; }
+  .gw .log-head button { min-height: 40px; padding: 8px 12px; font-size: 14px; }
+  .gw pre {
+    margin: 0; padding: 12px; max-height: 50vh; overflow: auto;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    font: 12px/1.5 ui-monospace, "Roboto Mono", monospace; white-space: pre-wrap; word-break: break-word;
+  }
+  /* ---- Konfigurasi, dibatasi .cfg */
+  .cfg .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  .cfg .items li.key { flex-wrap: wrap; }
+  .cfg .items li.key .btn { min-height: 34px; padding: 6px 12px; }
+  /* Form edit sebaris */
+  .cfg .editor { flex-basis: 100%; display: grid; gap: 8px; margin-top: 4px; }
+  .cfg .editor input[type="password"], .cfg .editor input[type="text"] {
+    width: 100%; font: 14px ui-monospace, "Roboto Mono", monospace; color: var(--ink);
+    background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 44px;
+  }
+  .cfg .editor .show { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .cfg .editor .msg { font-size: 13px; margin: 0; min-height: 1.2em; }
+  .cfg .editor .msg.err { color: var(--err); }
+  .cfg .editor .btn.danger { color: var(--err); border-color: var(--err); margin-left: auto; }
+  .cfg .warn { color: var(--wait); }
+  .cfg .err-text { color: var(--err); }
+  /* Form cron */
+  .cfg .form { display: grid; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .cfg .field { display: grid; gap: 4px; }
+  .cfg .field-label { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .cfg .field-label .count { font-weight: 400; font-variant-numeric: tabular-nums; }
+  .cfg .field-hint { font-size: 12px; }
+  .cfg .form input, .cfg .form select, .cfg .form textarea {
+    width: 100%; font: 15px/1.4 system-ui, -apple-system, "Roboto", sans-serif; color: var(--ink);
+    background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 44px;
+  }
+  .cfg .form textarea { resize: vertical; min-height: 96px; }
+  .cfg .form .mono { font: 14px ui-monospace, "Roboto Mono", monospace; }
+  .cfg .form input.bad { border-color: var(--err); }
+  .cfg .form input:focus, .cfg .form select:focus, .cfg .form textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .cfg .form .msg { font-size: 13px; margin: 0; white-space: pre-wrap; }
+  .cfg .form .btn-row { margin-top: 0; }
+  .cfg .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .cfg .examples .ex {
+    font: 12px ui-monospace, "Roboto Mono", monospace; color: var(--accent); background: transparent;
+    border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; cursor: pointer;
+  }
+  .cfg .items.cron li { gap: 8px; }
+  .cfg .btn.small-btn { min-height: 34px; padding: 6px 12px; }
+  .cfg .cli-out {
+    margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--paper);
+    font: 12px/1.45 ui-monospace, "Roboto Mono", monospace; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .cfg .cli-out.err { color: var(--err); }
+  .cfg .auth { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font-size: 14px; color: var(--muted); }
+  /* ---- Terminal. Layout penuh layar hanya saat route #/tty (html.route-tty). */
+  :root { --term: #111820; }
+  @media (prefers-color-scheme: dark) { :root { --term: #0b1016; } }
+  html.route-tty, html.route-tty body { height: 100%; overflow: hidden; }
+  html.route-tty body {
+    /* --app-h = tinggi area yang benar-benar terlihat (di atas keyboard Android), diisi JS. */
+    height: var(--app-h, 100%);
+    padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+    font: 15px/1.4 system-ui, -apple-system, "Roboto", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  html.route-tty #app, html.route-tty .view-tty { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  /* Saat input fokus (keyboard kemungkinan terbuka) dan WebView tidak mengecilkan viewport:
+     pendekkan seluruh halaman agar baris aktif terminal tetap di atas keyboard. */
+  html.route-tty body.kb-open { height: calc(var(--app-h, 100vh) * var(--kb-frac, .55)); }
+  body.kb-open .bnav { display: none; }
+  .tty { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  .tty .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .tty select, .tty button {
+    font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; min-height: 38px;
+  }
+  .tty button { cursor: pointer; }
+  .tty button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .tty button:disabled { opacity: .45; }
+  .tty .term { flex: 1; min-height: 96px; background: var(--term); border-radius: 10px; padding: 6px; overflow: hidden; }
+  .tty .keys { display: flex; gap: 4px; overflow-x: auto; }
+  .tty .keys button { flex: 0 0 auto; min-width: 44px; padding: 6px 8px; font-size: 14px; }
+  .tty .hint { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.4em; }
+  .tty .hint b { color: var(--ink); font-weight: 600; }
+  .tty .stat { font: 12px/1.3 ui-monospace, monospace; color: var(--muted); }
+  .tty .stat b { color: var(--run); font-weight: 600; }
+  .tty .stat .dead { color: var(--err); }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
 </style>
 </head>
-<body data-page="status">
-<main class="page">
-  <div class="page-head">
-    <h1>agentbox</h1>
-    <span class="badge" id="build">…</span>
-  </div>
-
-  <!-- Ringkasan: siap / setup belum lengkap, beserta langkah berikutnya -->
-  <section class="card hero" id="hero" aria-live="polite">
-    <p class="hero-word" id="hero-word">Memeriksa…</p>
-    <p class="hero-detail" id="hero-detail"></p>
-    <div class="btn-row" id="hero-actions"></div>
-  </section>
-
-  <section class="card">
-    <h2>Komponen</h2>
-    <ul class="items" id="components"></ul>
-  </section>
-
-  <section class="card">
-    <h2>Gateway</h2>
-    <ul class="items" id="gateway"></ul>
-  </section>
-
-  <section class="card">
-    <h2>Sistem</h2>
-    <ul class="items" id="system"></ul>
-  </section>
-
-  <button class="refresh" id="refresh">Muat ulang</button>
-</main>
+<!-- WebUI satu dokumen (SPA), routing lewat hash (#/status, #/gateway, #/tty?profile=…, #/config). Halaman yang
+     sudah dikunjungi tetap ter-mount (hanya disembunyikan), jadi state-nya bertahan saat pindah tab. -->
+<body class="has-bnav">
+<div id="app"><main class="page"><section class="card"><p class="muted">Memuat…</p></section></main></div>
 
 <script src="app.js"></script>
+<script src="vendor/htm-preact.umd.js"></script>
 <script>
 (() => {
   "use strict";
-  const { cliJson, esc } = window.AB;
-  const $ = (id) => document.getElementById(id);
+  const { html, render, useState, useEffect, useRef, useCallback } = window.htmPreact;
+  const { MOD, NAV, run, cliJson, toast, esc, openUrl, copyText } = window.AB;
+
+  // ---------------------------------------------------------------- router (hash)
+
+  // #/<page>?<params>. Halaman tak dikenal -> status.
+  function parseHash() {
+    const m = /^#\/([a-z]+)(?:\?(.*))?$/.exec(location.hash);
+    const page = m && ROUTES[m[1]] ? m[1] : "status";
+    return { page, params: Object.fromEntries(new URLSearchParams((m && m[2]) || "")) };
+  }
+  const link = (page, params) => "#/" + page + (params ? "?" + new URLSearchParams(params) : "");
+
+  // Posisi scroll per halaman: semua halaman berbagi scroll window, jadi disimpan sebelum route berganti.
+  const scrolls = {};
+  function useRoute() {
+    const [route, setRoute] = useState(parseHash);
+    useEffect(() => {
+      const on = () => setRoute((prev) => { scrolls[prev.page] = window.scrollY; return parseHash(); });
+      window.addEventListener("hashchange", on);
+      return () => window.removeEventListener("hashchange", on);
+    }, []);
+    return route;
+  }
+
+  // Jalankan fn saat halaman aktif DAN dokumen terlihat (layar menyala, WebView di depan).
+  // Polling halaman yang tersembunyi wajib berhenti: tiap tick adalah ksu.exec.
+  function useWhileVisible(active, fn) {
+    const ref = useRef(fn);
+    ref.current = fn;
+    useEffect(() => {
+      if (!active) return undefined;
+      const on = () => { if (!document.hidden) ref.current(); };
+      document.addEventListener("visibilitychange", on);
+      return () => document.removeEventListener("visibilitychange", on);
+    }, [active]);
+  }
+
+  // ---------------------------------------------------------------- komponen dasar
+
+  const Chip = ({ cls = "", children }) => html`<span class=${"chip " + cls}>${children}</span>`;
+  const Val = ({ children }) => html`<span class="val">${children}</span>`;
+  const Item = ({ name, sub, right }) => html`
+    <li><div class="txt"><p class="name">${name}</p>${sub && html`<p class="sub">${sub}</p>`}</div>${right}</li>`;
+  const TtyLink = ({ profile, primary, children }) => html`
+    <a class=${"btn" + (primary ? " primary" : "")} href=${link("tty", { profile })}>${children}</a>`;
+
+  function fmtMb(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB"; }
+  function fmtUptime(sec) {
+    sec = Number(sec) || 0;
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return h ? `${h} j ${m} m` : m ? `${m} m` : `${sec} d`;
+  }
+  function fmtAgo(t) {
+    const s = Math.round((Date.now() - t) / 1000);
+    return s < 5 ? "baru saja" : s < 60 ? `${s} detik lalu` : `${Math.floor(s / 60)} menit lalu`;
+  }
+
+  // ---------------------------------------------------------------- halaman: Status
 
   // Urutan = alur setup. tty: profil Terminal yang menyelesaikan komponen itu.
   const COMPONENTS = [
@@ -68,125 +244,1309 @@
     { id: "hermes", name: "Hermes Agent", sub: "", tty: "hermes-install" },
     { id: "gateway", name: "Gateway Hermes", sub: "Telegram dsb.", tty: "gateway-setup" },
   ];
-  const ttyLink = (profile, text, primary) =>
-    `<a class="btn${primary ? " primary" : ""}" href="tty.html#profile=${encodeURIComponent(profile)}">${esc(text)}</a>`;
-  const chip = (cls, text) => `<span class="chip ${cls}">${esc(text)}</span>`;
-  const item = (name, sub, right) =>
-    `<li><div class="txt"><p class="name">${esc(name)}</p>${sub ? `<p class="sub">${sub}</p>` : ""}</div>${right}</li>`;
 
-  let last = null;          // JSON status terakhir
-  let versions = null;      // {claude, hermes} dari --versions
-
-  function render(s) {
-    $("build").textContent = s.build + (s.debug ? " · log debug" : "");
-    $("build").classList.toggle("warn", !!s.debug);
-
-    // ---- komponen
+  function Hero({ s }) {
+    if (s === null) {
+      return html`<section class="card hero" data-tone="err" aria-live="polite">
+        <p class="hero-word">Tidak bisa membaca status</p>
+        <p class="hero-detail">Buka halaman ini dari KernelSU Manager (module agentbox).</p></section>`;
+    }
+    if (!s) return html`<section class="card hero" aria-live="polite"><p class="hero-word">Memeriksa…</p></section>`;
     const comp = s.components || {};
-    $("components").innerHTML = COMPONENTS.map((c) => {
-      let sub = esc(c.sub);
-      if (c.id === "claude" || c.id === "hermes") {
-        const v = versions && versions[c.id];
-        sub = v ? `<code>${esc(v)}</code>` : (s[c.id] && s[c.id].installed && !versions ? "memuat versi…" : "");
-      }
-      if (c.id === "user" && s.agent && s.agent.exists) sub = esc(`uid ${s.agent.uid}${s.agent.uid !== s.agent.expected_uid ? " (seharusnya " + s.agent.expected_uid + ")" : ""}, tanpa sudo`);
-      return item(c.name, sub, comp[c.id] ? chip("ok", "terpasang") : chip("todo", "belum"));
-    }).join("");
-
-    // ---- langkah berikutnya
     const pending = COMPONENTS.filter((c) => !comp[c.id]);
-    const hero = $("hero");
-    let word, detail, actions = "";
+    let tone = "todo", word, detail, action = null;
     if (!s.rootfs) {
-      hero.dataset.tone = "todo";
       word = "Belum disiapkan";
       detail = "Rootfs belum ada. Setup mengunduh Void Linux lalu memasang Claude Code dan Hermes.";
-      actions = ttyLink("setup", "Mulai setup di Terminal", true);
+      action = html`<${TtyLink} profile="setup" primary>Mulai setup di Terminal<//>`;
     } else if (pending.length) {
-      const next = pending[0];
-      hero.dataset.tone = "todo";
       word = "Setup belum lengkap";
       detail = `Belum: ${pending.map((c) => c.name).join(", ")}.`;
-      actions = ttyLink(next.tty, `Lanjutkan: ${next.name}`, true);
+      action = html`<${TtyLink} profile=${pending[0].tty} primary>Lanjutkan: ${pending[0].name}<//>`;
     } else if (s.hermes && s.hermes.installed && !s.hermes.model_set) {
-      hero.dataset.tone = "todo";
       word = "Model Hermes belum diatur";
       detail = "Pilih provider dan model untuk Hermes.";
-      actions = ttyLink("hermes-setup", "Atur di Terminal (hermes setup)", true);
+      action = html`<${TtyLink} profile="hermes-setup" primary>Atur di Terminal (hermes setup)<//>`;
     } else {
-      hero.dataset.tone = "ok";
+      tone = "ok";
       word = "Siap digunakan";
-      const g = s.gateway || {};
-      detail = g.state === "running" ? "Semua komponen terpasang, gateway berjalan." : "Semua komponen terpasang. Gateway sedang berhenti.";
+      detail = (s.gateway || {}).state === "running" ? "Semua komponen terpasang, gateway berjalan." : "Semua komponen terpasang. Gateway sedang berhenti.";
     }
-    $("hero-word").textContent = word;
-    $("hero-detail").textContent = detail;
-    $("hero-actions").innerHTML = actions;
+    return html`<section class="card hero" data-tone=${tone} aria-live="polite">
+      <p class="hero-word">${word}</p>
+      <p class="hero-detail">${detail}</p>
+      ${action && html`<div class="btn-row">${action}</div>`}
+    </section>`;
+  }
 
-    // ---- gateway
+  function Components({ s, versions }) {
+    const comp = s.components || {};
+    return html`<section class="card"><h2>Komponen</h2><ul class="items">
+      ${COMPONENTS.map((c) => {
+        let sub = c.sub;
+        if (c.id === "claude" || c.id === "hermes") {
+          const v = versions && versions[c.id];
+          sub = v ? html`<code>${v}</code>` : (s[c.id] && s[c.id].installed && !versions ? "memuat versi…" : "");
+        }
+        if (c.id === "user" && s.agent && s.agent.exists) {
+          sub = `uid ${s.agent.uid}${s.agent.uid !== s.agent.expected_uid ? " (seharusnya " + s.agent.expected_uid + ")" : ""}, tanpa sudo`;
+        }
+        return html`<${Item} key=${c.id} name=${c.name} sub=${sub}
+          right=${comp[c.id] ? html`<${Chip} cls="ok">terpasang<//>` : html`<${Chip} cls="todo">belum<//>`} />`;
+      })}
+    </ul></section>`;
+  }
+
+  const GW_STATE = { running: ["ok", "berjalan"], restarting: ["todo", "restart"], stopped: ["", "berhenti"] };
+  function Gateway({ s }) {
     const g = s.gateway || {};
-    const st = { running: chip("ok", "berjalan"), restarting: chip("todo", "restart"), stopped: chip("", "berhenti") }[g.state] || chip("", "?");
-    $("gateway").innerHTML =
-      item("Status", g.state === "running" ? esc(`PID ${g.pid}, aktif ${fmtUptime(g.uptime)}`) : "", st) +
-      item("Dikonfigurasi", "", g.configured ? chip("ok", "ya") : chip("todo", "belum")) +
-      item("Jalan saat HP menyala", "", g.autostart ? chip("ok", "aktif") : chip("", "mati")) +
-      apiRow((s.hermes || {}).api_server) +
-      `<li><a class="btn" href="gateway.html">Buka halaman Gateway</a></li>`;
+    const [cls, text] = GW_STATE[g.state] || ["", "?"];
+    const a = (s.hermes || {}).api_server;
+    return html`<section class="card"><h2>Gateway</h2><ul class="items">
+      <${Item} name="Status" sub=${g.state === "running" ? `PID ${g.pid}, aktif ${fmtUptime(g.uptime)}` : ""} right=${html`<${Chip} cls=${cls}>${text}<//>`} />
+      <${Item} name="Dikonfigurasi" right=${g.configured ? html`<${Chip} cls="ok">ya<//>` : html`<${Chip} cls="todo">belum<//>`} />
+      <${Item} name="Jalan saat HP menyala" right=${g.autostart ? html`<${Chip} cls="ok">aktif<//>` : html`<${Chip}>mati<//>`} />
+      ${a && html`<${Item} name="API untuk aplikasi" sub=${html`${a.host}:${a.port} · <a href=${link("config")}>atur</a>`}
+        right=${!a.enabled ? html`<${Chip}>nonaktif<//>` : a.listening ? html`<${Chip} cls="ok">aktif<//>` : html`<${Chip} cls="todo">aktif, belum mendengar<//>`} />`}
+      <li><a class="btn" href=${link("gateway")}>Buka halaman Gateway</a></li>
+    </ul></section>`;
+  }
 
-    // ---- sistem
+  const AUTH = { env: ["ok", "API key"], token: ["ok", "token OAuth"], oauth: ["ok", "login"], wrong: ["err", "token salah tempat"], none: ["todo", "belum"] };
+  function System({ s }) {
     const free = s.disk_free_mb;
-    const auth = { env: chip("ok", "API key"), token: chip("ok", "token OAuth"), oauth: chip("ok", "login"), wrong: chip("err", "token salah tempat"), none: chip("todo", "belum") }[s.claude && s.claude.auth] || chip("", "?");
-    $("system").innerHTML =
-      item("Arsitektur", "", `<span class="val">${esc(s.arch)}</span>`) +
-      item("Ruang /data", free != null && free < 3072 ? "Setup lengkap butuh sekitar 3 GB" : "",
-        free == null ? chip("", "?") : (free < 3072 ? chip("todo", fmtMb(free)) : `<span class="val">${esc(fmtMb(free))}</span>`)) +
-      item("Mount chroot", "Di sesi WebUI ini", `<span class="val">${esc(s.mounts)} aktif</span>`) +
-      item("Autentikasi Claude Code",
-        s.claude && s.claude.auth === "none" ? `<a href="tty.html#profile=claude-login">Login di Terminal</a>, atau isi kunci di <a href="config.html">Konfigurasi</a>`
-          : s.claude && s.claude.auth === "wrong" ? `Token OAuth tersimpan sebagai ANTHROPIC_API_KEY. Perbaiki di <a href="config.html">Konfigurasi</a>.` : "",
-        auth);
+    const auth = s.claude && s.claude.auth;
+    const [acls, atext] = AUTH[auth] || ["", "?"];
+    const authSub = auth === "none"
+      ? html`<a href=${link("tty", { profile: "claude-login" })}>Login di Terminal</a>, atau isi kunci di <a href=${link("config")}>Konfigurasi</a>`
+      : auth === "wrong" ? html`Token OAuth tersimpan sebagai ANTHROPIC_API_KEY. Perbaiki di <a href=${link("config")}>Konfigurasi</a>.` : "";
+    return html`<section class="card"><h2>Sistem</h2><ul class="items">
+      <${Item} name="Arsitektur" right=${html`<${Val}>${s.arch}<//>`} />
+      <${Item} name="Ruang /data" sub=${free != null && free < 3072 ? "Setup lengkap butuh sekitar 3 GB" : ""}
+        right=${free == null ? html`<${Chip}>?<//>` : free < 3072 ? html`<${Chip} cls="todo">${fmtMb(free)}<//>` : html`<${Val}>${fmtMb(free)}<//>`} />
+      <${Item} name="Mount chroot" sub="Di sesi WebUI ini" right=${html`<${Val}>${s.mounts} aktif<//>`} />
+      <${Item} name="Autentikasi Claude Code" sub=${authSub} right=${html`<${Chip} cls=${acls}>${atext}<//>`} />
+    </ul></section>`;
   }
 
-  // API Server Hermes untuk aplikasi klien (hermes-android); diatur di halaman Konfigurasi.
-  function apiRow(a) {
-    if (!a) return "";
-    const st = !a.enabled ? chip("", "nonaktif") : a.listening ? chip("ok", "aktif") : chip("todo", "aktif, belum mendengar");
-    return item("API untuk aplikasi", esc(`${a.host}:${a.port}`) + ` · <a href="config.html">atur</a>`, st);
+  function StatusPage({ active }) {
+    const [s, setS] = useState(undefined);            // undefined = belum dimuat, null = gagal
+    const [versions, setVersions] = useState(null);   // {claude, hermes} dari --versions
+    const [at, setAt] = useState(0);                  // waktu data terakhir
+    const busy = useRef(false);
+
+    const load = useCallback(async (withVersions) => {
+      if (busy.current) return;
+      busy.current = true;
+      const st = await cliJson("status --json");
+      setS(st);
+      if (st) setAt(Date.now());
+      busy.current = false;
+      // Versi lambat (hermes ~5 detik): dimuat terpisah setelah halaman tampil, dan hanya sekali per sesi
+      // kecuali diminta lewat tombol Muat ulang.
+      if (st && withVersions) {
+        const v = await cliJson("status --json --versions");
+        setVersions(v ? { claude: v.claude && v.claude.version, hermes: v.hermes && v.hermes.version } : {});
+        if (v) setS(v);
+      }
+    }, []);
+
+    // Pertama kali aktif: muat lengkap. Kembali ke tab ini: data lama langsung tampil, disegarkan di latar.
+    const first = useRef(true);
+    useEffect(() => {
+      if (!active) return;
+      load(first.current);
+      first.current = false;
+    }, [active]);
+    useWhileVisible(active, () => load(false));
+
+    return html`<main class="page">
+      <div class="page-head">
+        <h1>agentbox</h1>
+        ${s && html`<span class=${"badge" + (s.debug ? " warn" : "")}>${s.build}${s.debug ? " · log debug" : ""}</span>`}
+      </div>
+      <${Hero} s=${s} />
+      ${s && html`
+        <${Components} s=${s} versions=${versions} />
+        <${Gateway} s=${s} />
+        <${System} s=${s} />`}
+      <button class="refresh" onClick=${() => load(true)}>Muat ulang</button>
+      ${at > 0 && html` <span class="stamp">diperbarui ${fmtAgo(at)}</span>`}
+    </main>`;
   }
 
-  function fmtMb(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB"; }
-  function fmtUptime(sec) {
-    sec = Number(sec) || 0;
-    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
-    return h ? `${h} j ${m} m` : m ? `${m} m` : `${sec} d`;
+  // ---------------------------------------------------------------- halaman: Gateway
+
+  const GW = `sh ${MOD}/lib/gateway.sh`;
+
+  function fmtUptimeLong(sec) {
+    if (sec < 60) return "kurang dari semenit";
+    const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+    const parts = [];
+    if (d) parts.push(d + " hari");
+    if (h) parts.push(h + " jam");
+    if (m && !d) parts.push(m + " menit");
+    return parts.join(" ");
   }
 
-  let loading = false;
-  async function load(withVersions) {
-    if (loading) return;
-    loading = true;
-    const s = await cliJson("status --json");
-    if (!s) {
-      $("hero").dataset.tone = "err";
-      $("hero-word").textContent = "Tidak bisa membaca status";
-      $("hero-detail").textContent = "Buka halaman ini dari KernelSU Manager (module agentbox).";
-      loading = false;
-      return;
+  // Polling tiap ms selama halaman aktif dan dokumen terlihat.
+  function useInterval(active, ms, fn) {
+    const ref = useRef(fn);
+    ref.current = fn;
+    useEffect(() => {
+      if (!active) return undefined;
+      const t = setInterval(() => { if (!document.hidden) ref.current(); }, ms);
+      return () => clearInterval(t);
+    }, [active, ms]);
+  }
+
+  function GatewayPage({ active }) {
+    const [s, setS] = useState(undefined);        // JSON `gateway.sh status --json`; undefined = belum, null = gagal
+    const [readErr, setReadErr] = useState("");   // stderr saat status gagal dibaca
+    const [actErr, setActErr] = useState("");     // galat aksi terakhir; hilang pada aksi berikutnya
+    const [pending, setPending] = useState("");   // "toggle" | "restart" | "autostart" | ""
+    const [log, setLog] = useState("Memuat…");
+    const [autoWant, setAutoWant] = useState(false);  // nilai switch selama perintah autostart berjalan
+    const busy = useRef(false);
+    const pre = useRef(null);
+
+    const refresh = useCallback(async () => {
+      const r = await run(`${GW} status --json`);
+      let st = null;
+      try { st = JSON.parse(r.stdout.trim()); } catch (_) { st = null; }
+      setReadErr(r.errno !== 0 && !st ? (r.stderr || "Status gateway gagal dibaca.").trim() : "");
+      setS(st);
+    }, []);
+    const loadLog = useCallback(async () => {
+      const r = await run(`${GW} log 200`);
+      setLog(r.stdout.trim() || "Belum ada log. Log muncul setelah gateway dijalankan.");
+    }, []);
+    useEffect(() => { if (pre.current) pre.current.scrollTop = pre.current.scrollHeight; }, [log]);
+
+    // Tiap kali tab ini aktif: status + log disegarkan; data lama tampil selama menunggu.
+    useEffect(() => {
+      if (!active) return;
+      refresh();
+      loadLog();
+    }, [active]);
+    useInterval(active, 3000, () => { if (!busy.current) refresh(); });
+    useWhileVisible(active, () => { if (!busy.current) refresh(); });
+
+    // Aksi tetap selesai walau user pindah tab: halaman tidak di-unmount.
+    async function act(kind, args, okToast) {
+      busy.current = true;
+      setPending(kind);
+      setActErr("");
+      const r = await run(`${GW} ${args}`);
+      if (r.errno !== 0) setActErr((r.stderr || r.stdout || "Perintah gagal.").trim());
+      else toast(okToast || r.stdout.trim());
+      await refresh();
+      busy.current = false;
+      setPending("");
+      if (kind !== "autostart") loadLog();
     }
-    last = s;
-    render(s);
-    loading = false;
-    // Versi lambat (hermes ~5 detik): dimuat terpisah setelah halaman tampil.
-    if (withVersions) {
-      const v = await cliJson("status --json --versions");
-      versions = v ? { claude: v.claude && v.claude.version, hermes: v.hermes && v.hermes.version } : {};
-      render(v || last);
+
+    const on = s && s.state !== "stopped";
+    const ready = s && s.installed && s.configured;
+    let state = "stopped", word = "Memeriksa…", detail = "";
+    if (s === null) {
+      state = "error"; word = "Tidak terbaca"; detail = "Status gateway gagal dibaca.";
+    } else if (s) {
+      state = s.state;
+      if (s.state === "running") { word = "Berjalan"; detail = `Aktif ${fmtUptimeLong(s.uptime)}, PID ${s.pid}`; }
+      else if (s.state === "restarting") { word = "Menunggu restart"; detail = "Gateway berhenti dan akan dicoba lagi. Cek log di bawah."; }
+      else { word = "Berhenti"; detail = ready ? "Gateway tidak berjalan." : ""; }
     }
+
+    // Dua slot pesan yang selalu ada (disembunyikan bila kosong): elemen bersyarat tanpa key bisa membuat
+    // Preact mencocokkan <div> baru dengan .row di bawahnya, sehingga switch autostart dibuat ulang.
+    const error = actErr || readErr;
+    let setupMsg = "";
+    if (s && !s.installed) {
+      setupMsg = html`Hermes belum terpasang. Pasang lewat <a href=${link("tty", { profile: "hermes-install" })}>Terminal → install Hermes</a>.`;
+    } else if (s && !s.configured) {
+      setupMsg = html`Gateway belum dikonfigurasi. Atur lewat <a href=${link("tty", { profile: "gateway-setup" })}>Terminal → gateway setup</a>.`;
+    }
+
+    const toggleText = pending === "toggle" ? (on ? "Menghentikan…" : "Menjalankan…") : (on ? "Hentikan" : "Jalankan");
+    return html`<main class="page gw">
+      <div class="page-head"><h1>Gateway</h1></div>
+
+      <div class="status" data-state=${state} aria-live="polite">
+        <p class="status-name">Hermes gateway</p>
+        <p class="status-word">${word}</p>
+        <p class="status-detail">${detail}</p>
+        <div class="actions">
+          <button class="primary" disabled=${!s || !!pending || (!on && !ready)}
+            onClick=${() => act("toggle", on ? "stop" : "start")}>${toggleText}</button>
+          <button disabled=${!s || !!pending || !on}
+            onClick=${() => act("restart", "restart")}>${pending === "restart" ? "Memulai ulang…" : "Mulai ulang"}</button>
+        </div>
+      </div>
+
+      <div class="notice" role="alert" hidden=${!error}>${error}</div>
+      <div class="notice" hidden=${!setupMsg}>${setupMsg}</div>
+
+      <div class="row">
+        <div>
+          <p id="gw-autostart-label">Jalankan saat HP menyala</p>
+          <p class="hint">Gateway otomatis start setelah boot selesai.</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" role="switch" aria-labelledby="gw-autostart-label"
+            checked=${pending === "autostart" ? autoWant : !!(s && s.autostart)} disabled=${!s || !!pending}
+            onChange=${(e) => { const want = e.currentTarget.checked; setAutoWant(want); act("autostart", "autostart " + (want ? "on" : "off"), want ? "Autostart aktif" : "Autostart nonaktif"); }} />
+          <span class="track"></span>
+        </label>
+      </div>
+
+      <section class="log">
+        <div class="log-head">
+          <h2>Log gateway</h2>
+          <button onClick=${loadLog}>Muat ulang log</button>
+        </div>
+        <pre ref=${pre}>${log}</pre>
+      </section>
+    </main>`;
   }
 
-  $("refresh").addEventListener("click", () => load(true));
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(false); });
-  load(true);
+  // ---------------------------------------------------------------- halaman: Konfigurasi
+  // Dirender dari `agentbox config show --json`. Nilai rahasia hanya pernah tampil tersamar; nilai baru dikirim
+  // ke CLI lewat stdin (base64) dan tidak disimpan halaman ini.
+
+  const CLI = `sh ${MOD}/system/bin/agentbox`;
+  const BB = "/data/adb/ksu/bin/busybox";
+  const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;   // nama kunci masuk ke perintah shell: wajib lolos ini
+  const VAL_RE = /^[!-~]{1,4096}$/;            // sama dengan validasi CLI: ASCII tercetak tanpa spasi
+  const RELEASES = "https://github.com/rusty4444/hermes-android/releases";
+
+  const stripAnsi = (s) => String(s || "").replace(/\x1b\[[0-9;]*m/g, "").trim();
+  function b64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+  const Masked = ({ v }) => html`<span class="val">${v}</span>`;
+  const Note = ({ children }) => html`<p class="note">${children}</p>`;
+
+  // Tombol dua ketukan: ketukan pertama mengganti teks jadi konfirmasi (batal sendiri setelah 4 detik).
+  // Dialog JS tidak selalu didukung WebView KernelSU.
+  function ConfirmButton({ cls = "btn", confirmText, onConfirm, disabled, children }) {
+    const [armed, setArmed] = useState(false);
+    useEffect(() => {
+      if (!armed) return undefined;
+      const t = setTimeout(() => setArmed(false), 4000);
+      return () => clearTimeout(t);
+    }, [armed]);
+    const click = () => { if (armed) { setArmed(false); onConfirm(); } else setArmed(true); };
+    return html`<button class=${cls} disabled=${disabled} onClick=${click}>${armed ? confirmText : children}</button>`;
+  }
+
+  // Hasil `config auth-check` untuk satu sisi (claude / hermes).
+  const AUTH_TEXT = {
+    valid: ["ok", "valid"],
+    refreshable: ["ok", "login aktif (diperbarui otomatis)"],
+    invalid: ["err", "ditolak Anthropic (401)"],
+    "wrong-var": ["err", "token di variabel yang salah"],
+    offline: ["todo", "tidak bisa dicek (offline?)"],
+    none: ["todo", "belum ada kredensial"],
+  };
+  function AuthLine({ r }) {
+    if (r === undefined) return html`<p class="auth">Memeriksa kredensial ke Anthropic…</p>`;
+    if (r === null) return html`<p class="auth">Cek kredensial gagal.</p>`;
+    if (r.status === "not-anthropic") return null;
+    const [cls, text] = AUTH_TEXT[r.status] || ["todo", `tidak bisa dipastikan (HTTP ${r.http || "?"})`];
+    const src = r.source === "login" ? "login Claude Code" : r.source === "none" ? "" : r.source.replace(/^(env|hermes):/, "");
+    return html`<p class="auth">Kredensial dipakai: ${src ? html`<code>${src}</code>` : "—"} <${Chip} cls=${cls}>${text}<//></p>`;
+  }
+
+  // ---------------------------------------------------------------- baris kunci + form edit sebaris
+
+  // kind: "claude" (config/env agentbox) | "hermes" (~/.hermes/.env lewat hermes config set)
+  function KeyRow({ kind, k, masked, sub, canDelete, open, onOpen, onClose, onChanged }) {
+    const [val, setVal] = useState("");
+    const [show, setShow] = useState(false);
+    const [msg, setMsg] = useState(null);           // { err, text }
+    const [busy, setBusy] = useState(false);
+    const inputRef = useRef(null);
+
+    useEffect(() => {
+      if (open) { if (inputRef.current) inputRef.current.focus(); }
+      else { setVal(""); setShow(false); setMsg(null); }
+    }, [open]);
+
+    async function save() {
+      const v = val.trim();
+      if (!KEY_RE.test(k)) return;
+      if (!VAL_RE.test(v)) { setMsg({ err: true, text: "Nilai tidak valid: hanya karakter ASCII tanpa spasi (1–4096)." }); return; }
+      // Nilai dioper lewat stdin CLI (base64 di perintah ksu.exec, proses root; /proc Android hidepid).
+      const sub = kind === "hermes" ? `config hermes-key ${k} --stdin` : `config set ${k} --stdin`;
+      setVal("");
+      setBusy(true);
+      setMsg({ err: false, text: kind === "hermes" ? "Menyimpan lewat Hermes… (bisa ~10 detik)" : "Menyimpan…" });
+      const r = await run(`printf '%s' '${b64(v)}' | ${BB} base64 -d | ${CLI} ${sub}`);
+      setBusy(false);
+      if (r.errno === 0) { toast(r.stdout.trim().split("\n")[0] || `${k} disimpan`); onChanged(); }
+      else setMsg({ err: true, text: stripAnsi(r.stderr || r.stdout) || "Gagal menyimpan" });
+    }
+
+    async function del() {
+      if (!KEY_RE.test(k)) return;
+      setBusy(true);
+      setMsg({ err: false, text: "Menghapus…" });
+      const r = await run(`${CLI} config unset ${k}`);
+      setBusy(false);
+      if (r.errno === 0) { toast(`${k} dihapus`); onChanged(); }
+      else setMsg({ err: true, text: stripAnsi(r.stderr) || "Gagal menghapus" });
+    }
+
+    return html`
+      <li class="key">
+        <div class="txt"><p class="name">${k}</p>${sub && html`<p class="sub">${sub}</p>`}</div>
+        ${masked ? html`<${Masked} v=${masked} />` : html`<${Chip} cls="todo">kosong<//>`}
+        <button class="btn" onClick=${open ? onClose : onOpen}>${masked ? "Ubah" : "Isi"}</button>
+        ${open && html`
+          <div class="editor">
+            <input ref=${inputRef} type=${show ? "text" : "password"} value=${val} disabled=${busy}
+              autocomplete="off" autocapitalize="off" spellcheck=${false}
+              placeholder=${"Tempel nilai baru " + k} aria-label=${"Nilai baru " + k}
+              onInput=${(e) => setVal(e.target.value)}
+              onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); save(); } }} />
+            <label class="show"><input type="checkbox" checked=${show} disabled=${busy}
+              onChange=${(e) => setShow(e.target.checked)} /> tampilkan</label>
+            <div class="btn-row" style="margin-top:0">
+              <button class="btn primary" disabled=${busy} onClick=${save}>Simpan</button>
+              <button class="btn" disabled=${busy} onClick=${onClose}>Batal</button>
+              ${canDelete && masked && html`
+                <${ConfirmButton} cls="btn danger" confirmText="Yakin hapus?" disabled=${busy} onConfirm=${del}>Hapus<//>`}
+            </div>
+            <p class=${"msg" + (msg && msg.err ? " err" : "")} role="status">${msg ? msg.text : ""}</p>
+          </div>`}
+      </li>`;
+  }
+
+  // ---------------------------------------------------------------- kartu
+
+  function ModelCard({ h }) {
+    return html`
+      <section class="card"><h2>Model Hermes</h2>
+        <ul class="items">
+          ${h.model_set
+            ? html`<${Item} name="Provider" right=${html`<${Masked} v=${h.provider} />`} />
+                   <${Item} name="Model" right=${html`<${Masked} v=${h.model || "?"} />`} />`
+            : html`<${Item} name="Provider & model" sub="Template bawaan installer (provider auto)"
+                     right=${html`<${Chip} cls="todo">belum diatur<//>`} />`}
+        </ul>
+        <div class="btn-row">
+          ${h.model_set
+            ? html`<${TtyLink} profile="hermes-model" primary>Ganti model (hermes model)<//>
+                   <${TtyLink} profile="hermes-setup">Setup lengkap (hermes setup)<//>`
+            : html`<${TtyLink} profile="hermes-setup" primary>Atur (hermes setup)<//>`}
+        </div>
+      </section>`;
+  }
+
+  function HermesKeysCard({ h, auth, claudeLogin, rowProps, onChanged }) {
+    // API_SERVER_KEY dikelola kartu "Aplikasi Hermes Android" (config hermes-api), bukan form kunci biasa.
+    const secrets = (h.secrets || []).filter((s) => s.key !== "API_SERVER_KEY");
+    const has = (k) => secrets.some((s) => s.key === k);
+    const anth = h.provider === "anthropic";
+    const [linking, setLinking] = useState(false);
+
+    async function linkClaude() {
+      setLinking(true);
+      const r = await run(`${CLI} config hermes-link-claude`);
+      setLinking(false);
+      const out = stripAnsi(r.errno === 0 ? r.stdout : (r.stderr || r.stdout));
+      toast(out.split("\n").pop() || (r.errno === 0 ? "Selesai" : "Gagal"));
+      onChanged();
+    }
+
+    const providerRow = h.provider_key && !h.provider_key_set && html`
+      <${KeyRow} kind="hermes" k=${h.provider_key} ...${rowProps("hermes", h.provider_key)}
+        sub=${anth
+          ? html`Hanya API key berbayar (sk-ant-api…). Langganan Claude Pro/Max/Team: pakai login, bukan kunci ini.
+              ${has("ANTHROPIC_TOKEN") && html` <span class="warn">Bila diisi, dipakai lebih dulu daripada ANTHROPIC_TOKEN.</span>`}`
+          : `API key untuk provider ${h.provider}`} />`;
+
+    return html`
+      <section class="card"><h2>Kunci & token Hermes</h2>
+        ${anth && html`<${AuthLine} r=${auth} />`}
+        <ul class="items">
+          ${secrets.map((s) => html`
+            <${KeyRow} key=${s.key} kind="hermes" k=${s.key} masked=${s.masked} ...${rowProps("hermes", s.key)}
+              sub=${s.key === "ANTHROPIC_API_KEY" && s.kind === "oauth" && html`<span class="err-text">Token OAuth di slot API key:
+                simpan sebagai ANTHROPIC_TOKEN, atau pakai login Claude Code.</span>`} />`)}
+          ${providerRow}
+          ${!secrets.length && !providerRow && html`<${Item} name="Belum ada" sub="Belum ada API key/token di ~/.hermes/.env"
+            right=${html`<${Chip} cls="todo">kosong<//>`} />`}
+        </ul>
+        ${anth && html`
+          <div class="btn-row">
+            ${claudeLogin.logged_in && !has("ANTHROPIC_API_KEY") && !has("ANTHROPIC_TOKEN") && !has("CLAUDE_CODE_OAUTH_TOKEN")
+              ? html`<${Chip} cls="ok">memakai login Claude Code<//>`
+              : claudeLogin.logged_in
+              ? html`<${ConfirmButton} cls="btn primary" disabled=${linking} onConfirm=${linkClaude}
+                  confirmText="Yakin? Token Anthropic di .env Hermes dikosongkan">
+                  ${linking ? "Memproses… (bisa ~10 detik)" : "Pakai login Claude Code"}<//>`
+              : html`<${TtyLink} profile="claude-login" primary>Login Claude Code dulu<//>`}
+            <${TtyLink} profile="hermes-auth">Login Hermes (Anthropic)<//>
+          </div>`}
+        <${Note}>Disimpan Hermes sendiri (<code>hermes config set</code>) ke <code>~/.hermes/.env</code>
+          (600, milik agent). Gateway yang sedang berjalan di-restart setelah disimpan. Hanya kunci yang sudah ada
+          dan kunci provider aktif yang bisa diubah di sini; selebihnya lewat wizard di Terminal.
+          ${anth && html` Urutan yang dipakai Hermes: ANTHROPIC_API_KEY → ANTHROPIC_TOKEN → login Claude Code.
+          "Pakai login Claude Code" mengosongkan token di .env sehingga Hermes memakai login itu (diperbarui otomatis).`}<//>
+      </section>`;
+  }
+
+  function ApiCard({ a, active, onChanged }) {
+    const [key, setKey] = useState(null);       // kunci yang sedang ditampilkan (hanya atas permintaan)
+    const [busy, setBusy] = useState(false);
+
+    // Halaman tetap ter-mount saat pindah tab: kunci jangan tertinggal di DOM yang tersembunyi.
+    useEffect(() => { if (!active) setKey(null); }, [active]);
+
+    useEffect(() => {                           // jangan biarkan kunci terpampang
+      if (key === null) return undefined;
+      const t = setTimeout(() => setKey(null), 60000);
+      return () => clearTimeout(t);
+    }, [key]);
+
+    async function readKey() {
+      const r = await run(`${CLI} config hermes-api show`);
+      if (r.errno !== 0) { toast("Gagal membaca kunci"); return null; }
+      return r.stdout.trim();
+    }
+    async function reveal() {
+      if (key !== null) { setKey(null); return; }
+      const k = await readKey();
+      if (k) setKey(k);
+    }
+    async function copy() {
+      const k = await readKey();
+      if (k) toast((await copyText(k)) ? "Kunci disalin" : "Gagal menyalin; pakai Tampilkan lalu salin manual");
+    }
+    async function act(cmd) {
+      setBusy(true);
+      setKey(null);
+      const r = await run(`${CLI} config hermes-api ${cmd}`);
+      setBusy(false);
+      toast(stripAnsi(r.errno === 0 ? r.stdout : (r.stderr || r.stdout)).split("\n")[0] || (r.errno === 0 ? "Selesai" : "Gagal"));
+      onChanged();
+    }
+
+    const state = !a.enabled ? html`<${Chip}>nonaktif<//>`
+      : a.listening ? html`<${Chip} cls="ok">mendengarkan<//>` : html`<${Chip} cls="todo">aktif, gateway berhenti<//>`;
+    return html`
+      <section class="card"><h2>Aplikasi Hermes Android</h2>
+        <ul class="items">
+          <${Item} name="API Server" right=${state}
+            sub=${a.enabled && !a.listening && html`Jalankan gateway di <a href=${link("gateway")}>halaman Gateway</a>.`} />
+          <${Item} name="Host & port" sub="Isi di aplikasi saat menambah koneksi"
+            right=${html`<${Masked} v=${`${a.host || "127.0.0.1"} : ${a.port || 8642}`} />`} />
+          ${a.enabled && html`
+            <li><div class="txt"><p class="name">API Key</p>
+              <p class="sub">${key !== null ? html`<code>${key}</code>` : "Disembunyikan"}</p></div>
+              <button class="btn" onClick=${reveal}>${key !== null ? "Sembunyikan" : "Tampilkan"}</button></li>`}
+        </ul>
+        ${a.enabled && !a.loopback && html`<${Note}><${Chip} cls="err">bukan loopback<//>
+          API_SERVER_HOST membuat API bisa diakses dari jaringan.<//>`}
+        <div class="btn-row">
+          ${a.enabled
+            ? html`<button class="btn primary" disabled=${busy} onClick=${copy}>Salin kunci</button>
+                   <${ConfirmButton} disabled=${busy} confirmText="Yakin ganti kunci?" onConfirm=${() => act("rotate")}>Ganti kunci<//>
+                   <${ConfirmButton} disabled=${busy} confirmText="Yakin nonaktifkan?" onConfirm=${() => act("off")}>Nonaktifkan<//>`
+            : html`<button class="btn primary" disabled=${busy} onClick=${() => act("on")}>
+                     ${busy ? "Memproses… (bisa ~10 detik)" : "Aktifkan API"}</button>`}
+          <button class="btn" onClick=${() => openUrl(RELEASES)}>Unduh aplikasi</button>
+        </div>
+        <${Note}>Klien chat <code>rusty4444/hermes-android</code> terhubung ke Gateway API Server Hermes di HP ini
+          (hanya 127.0.0.1, wajib API key). Kunci memberi kendali penuh atas Hermes: simpan hanya di aplikasi itu, dan
+          ganti bila bocor. Dashboard (port 9119: Memory, Skills) sengaja tidak diaktifkan, karena di loopback
+          ia tanpa login dan bisa diambil alih aplikasi lain. Cron diatur di kartu Cron job di bawah.<//>
+      </section>`;
+  }
+
+  // ---------------------------------------------------------------- Cron job
+  // Prompt dikirim lewat stdin (base64) seperti nilai rahasia: karakter shell di
+  // prompt tidak boleh pernah masuk argv. Nama & jadwal divalidasi di sisi halaman
+  // juga, tapi CLI yang jadi penentu (cron.sh menolak nama di luar [A-Za-z0-9_-]).
+  const CRON_NAME_RE = /^[A-Za-z0-9_-]{1,40}$/;
+  const CRON_MAX_PROMPT = 8192;
+  const DELIVER_OPTS = [
+    ["local", "Simpan saja (local)"],
+    ["origin", "Asal job dibuat (origin)"],
+    ["all", "Semua channel (all)"],
+    ["telegram", "Telegram"],
+    ["discord", "Discord"],
+    ["signal", "Signal"],
+  ];
+  const SCHED_EXAMPLES = ["0 7 * * *", "every monday 9am", "30m"];
+  const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
+  function CronForm({ busy, onSubmit, onCancel }) {
+    const [name, setName] = useState("");
+    const [sched, setSched] = useState("");
+    const [deliver, setDeliver] = useState("local");
+    const [prompt, setPrompt] = useState("");
+    const [err, setErr] = useState("");
+    const nameRef = useRef(null);
+    useEffect(() => { if (nameRef.current) nameRef.current.focus(); }, []);
+
+    const nameBad = name.length > 0 && !CRON_NAME_RE.test(name);
+    const submit = async () => {
+      if (!CRON_NAME_RE.test(name)) { setErr("Nama hanya boleh A-Z a-z 0-9 _ - (maks. 40)."); return; }
+      if (!sched.trim()) { setErr("Jadwal belum diisi."); return; }
+      if (!prompt.trim()) { setErr("Prompt belum diisi."); return; }
+      if (prompt.length > CRON_MAX_PROMPT) { setErr(`Prompt terlalu panjang (${prompt.length}/${CRON_MAX_PROMPT}).`); return; }
+      setErr("");
+      const e = await onSubmit({ name, sched: sched.trim(), deliver, prompt });
+      if (e) setErr(e);
+    };
+
+    return html`
+      <div class="form">
+        <label class="field"><span class="field-label">Nama</span>
+          <input ref=${nameRef} type="text" class=${nameBad ? "bad" : ""} value=${name} placeholder="ringkasan-pagi"
+            autocapitalize="off" autocomplete="off" spellcheck=${false} maxlength="40"
+            onInput=${(e) => setName(e.target.value)} />
+          ${nameBad && html`<span class="field-hint err-text">Hanya A-Z a-z 0-9 _ - (maks. 40).</span>`}</label>
+        <label class="field"><span class="field-label">Jadwal</span>
+          <input type="text" class="mono" value=${sched} placeholder="0 7 * * *"
+            autocapitalize="off" autocomplete="off" spellcheck=${false}
+            onInput=${(e) => setSched(e.target.value)} />
+          <span class="examples">Contoh:
+            ${SCHED_EXAMPLES.map((x) => html`<button type="button" key=${x} class="ex" onClick=${() => setSched(x)}>${x}</button>`)}
+          </span></label>
+        <label class="field"><span class="field-label">Kirim hasil ke</span>
+          <select value=${deliver} onChange=${(e) => setDeliver(e.target.value)}>
+            ${DELIVER_OPTS.map(([v, t]) => html`<option key=${v} value=${v}>${t}</option>`)}
+          </select></label>
+        <label class="field"><span class="field-label">Prompt
+            <span class="count">${prompt.length}/${CRON_MAX_PROMPT}</span></span>
+          <textarea rows="4" value=${prompt}
+            placeholder="Instruksi lengkap. Job berjalan di sesi baru, tanpa konteks chat."
+            onInput=${(e) => setPrompt(e.target.value)}></textarea></label>
+        ${err && html`<p class="msg err-text">${err}</p>`}
+        <div class="btn-row">
+          <button class="btn primary" disabled=${busy} onClick=${submit}>${busy ? "Menyimpan… (bisa ~10 detik)" : "Simpan job"}</button>
+          <button class="btn" disabled=${busy} onClick=${onCancel}>Batal</button>
+        </div>
+      </div>`;
+  }
+
+  // tick: naik tiap halaman memuat ulang konfigurasi, supaya daftar cron ikut segar.
+  function CronCard({ tick }) {
+    const [data, setData] = useState(undefined);   // undefined = memuat, null = gagal
+    const [adding, setAdding] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState(null);           // { err, text } keluaran CLI terakhir
+
+    const load = useCallback(async () => {
+      const d = await cliJson(`config cron list --json`);
+      setData(d && Array.isArray(d.declared) ? d.declared : null);
+    }, []);
+    useEffect(() => { load(); }, [load, tick]);
+
+    const add = async ({ name, sched, deliver, prompt }) => {
+      setBusy(true); setMsg(null);
+      const r = await run(`printf '%s' '${b64(prompt)}' | ${BB} base64 -d | ${CLI} config cron add ${shq(name)} ${shq(sched)} --deliver ${shq(deliver)} --prompt-stdin`);
+      setBusy(false);
+      load();   // deklarasi bisa tersimpan walau job gagal dibuat di Hermes
+      if (r.errno !== 0) return stripAnsi(r.stderr || r.stdout) || "Gagal membuat job.";
+      setAdding(false);
+      toast(`Job ${name} dibuat`);
+      return "";
+    };
+
+    const remove = async (n) => {
+      setBusy(true); setMsg(null);
+      const r = await run(`${CLI} config cron remove ${shq(n)}`);
+      setBusy(false);
+      const out = stripAnsi(r.errno === 0 ? r.stdout : r.stderr || r.stdout);
+      if (r.errno === 0 && !/CATATAN/.test(out)) toast(`Job ${n} dihapus`);
+      else setMsg({ err: r.errno !== 0, text: out || "Gagal menghapus." });
+      load();
+    };
+
+    const sync = async () => {
+      setBusy(true); setMsg(null);
+      const r = await run(`${CLI} config cron sync`);
+      setBusy(false);
+      setMsg({ err: r.errno !== 0, text: stripAnsi(r.stdout + "\n" + r.stderr) || "Selesai." });
+      load();
+    };
+
+    const pending = Array.isArray(data) ? data.filter((j) => !j.in_hermes).length : 0;
+    return html`
+      <section class="card"><h2>Cron job</h2>
+        ${data === undefined
+          ? html`<p class="muted">Memuat…</p>`
+          : data === null
+            ? html`<p class="muted">Tidak bisa membaca daftar cron.</p>`
+            : data.length === 0
+              ? !adding && html`<p class="muted small">Belum ada job. Hermes bisa menjalankan prompt sesuai jadwal dan
+                  mengirim hasilnya ke Telegram atau channel lain.</p>`
+              : html`<ul class="items cron">
+                  ${data.map((j) => html`
+                    <li key=${j.name}>
+                      <div class="txt">
+                        <p class="name">${j.name}</p>
+                        <p class="sub"><code>${j.schedule}</code> · ${j.deliver || "local"}</p>
+                      </div>
+                      <${Chip} cls=${j.in_hermes ? "ok" : "todo"}>${j.in_hermes ? "aktif" : "belum diterapkan"}<//>
+                      <${ConfirmButton} cls="btn small-btn" disabled=${busy} confirmText="Yakin?"
+                        onConfirm=${() => remove(j.name)}>Hapus<//>
+                    </li>`)}
+                </ul>`}
+        ${msg && html`<pre class=${"cli-out" + (msg.err ? " err" : "")}>${msg.text}</pre>`}
+        ${adding
+          ? html`<${CronForm} busy=${busy} onSubmit=${add} onCancel=${() => setAdding(false)} />`
+          : html`<div class="btn-row">
+              <button class="btn primary" disabled=${busy || data === null} onClick=${() => { setMsg(null); setAdding(true); }}>Tambah job</button>
+              ${pending > 0 && html`<button class="btn" disabled=${busy} onClick=${sync}>
+                ${busy ? "Menerapkan…" : `Terapkan ${pending} job ke Hermes`}</button>`}
+            </div>`}
+        <${Note}>Deklarasi disimpan di <code>config/cron.d</code> dan diterapkan ulang tiap boot; job yang sudah ada
+          (termasuk yang di-pause) tidak diubah. Menghapus di sini hanya menghapus deklarasi, bukan job di Hermes.<//>
+      </section>`;
+  }
+
+  function GatewayCard({ h }) {
+    const t = h.telegram || {};
+    return html`
+      <section class="card"><h2>Gateway & platform</h2>
+        <ul class="items">
+          <${Item} name="Gateway" right=${h.gateway_configured
+            ? html`<${Chip} cls="ok">dikonfigurasi<//>` : html`<${Chip} cls="todo">belum<//>`} />
+          <${Item} name="Telegram"
+            sub=${t.configured && html`${t.allowed_users} user diizinkan${t.home_channel ? ", home channel diatur" : ""}
+              ${t.allowed_users === 0 && html` <${Chip} cls="err">tanpa daftar user: akses terbuka<//>`}`}
+            right=${t.configured ? html`<${Chip} cls="ok">terhubung<//>` : html`<${Chip}>belum<//>`} />
+        </ul>
+        <div class="btn-row">
+          <${TtyLink} profile="gateway-setup" primary=${!h.gateway_configured}>
+            ${h.gateway_configured ? "Ubah (gateway setup)" : "Atur (gateway setup)"}<//>
+          <a class="btn" href=${link("gateway")}>Status gateway</a>
+        </div>
+        <${Note}>Platform lain (Discord, Slack, dll.) juga diatur lewat gateway setup.<//>
+      </section>`;
+  }
+
+  function ClaudeCard({ env, cl, auth, rowProps, onRecheck }) {
+    const has = (k) => env.some((e) => e.key === k);
+    return html`
+      <section class="card"><h2>Claude Code (agentbox)</h2>
+        <${AuthLine} r=${auth} />
+        <ul class="items">
+          <${Item} name="Login akun Claude"
+            sub=${cl.logged_in ? (cl.subscription ? `Langganan: ${cl.subscription}` : "Tersimpan di ~/.claude/.credentials.json")
+              : "Untuk langganan Pro/Max/Team"}
+            right=${html`${cl.logged_in ? html`<${Chip} cls="ok">login<//>` : html`<${Chip} cls="todo">belum<//>`}
+              <${TtyLink} profile="claude-login" primary=${!cl.logged_in}>${cl.logged_in ? "Login ulang" : "Login"}<//>`} />
+          ${env.map((e) => html`
+            <${KeyRow} key=${e.key} kind="claude" k=${e.key} masked=${e.masked} canDelete ...${rowProps("claude", e.key)}
+              sub=${e.key === "ANTHROPIC_API_KEY" && e.kind === "oauth" && html`<span class="err-text">Token OAuth di variabel
+                yang salah: Claude Code menolaknya, dan karena didahulukan, login pun tidak terpakai. Hapus, lalu login.</span>`} />`)}
+          ${!has("ANTHROPIC_API_KEY") && html`
+            <${KeyRow} kind="claude" k="ANTHROPIC_API_KEY" canDelete ...${rowProps("claude", "ANTHROPIC_API_KEY")}
+              sub="Hanya API key berbayar (sk-ant-api…); tidak perlu bila sudah login." />`}
+          ${!has("CLAUDE_CODE_OAUTH_TOKEN") && html`
+            <${KeyRow} kind="claude" k="CLAUDE_CODE_OAUTH_TOKEN" canDelete ...${rowProps("claude", "CLAUDE_CODE_OAUTH_TOKEN")}
+              sub=${html`Alternatif login: token dari <code>claude setup-token</code> (sk-ant-oat…).`} />`}
+        </ul>
+        <${Note}>Variabel disimpan di <code>/data/adb/agentbox/config/env</code> (600, root) dan diteruskan ke
+          <code>claude</code>. Urutan yang dipakai Claude Code: ANTHROPIC_API_KEY → CLAUDE_CODE_OAUTH_TOKEN → login.<//>
+        <div class="btn-row"><button class="btn" onClick=${onRecheck}>Cek ulang kredensial</button></div>
+      </section>`;
+  }
+
+  function ConfigPage({ active }) {
+    const [cfg, setCfg] = useState(null);
+    const [failed, setFailed] = useState(false);
+    const [auth, setAuth] = useState(undefined);   // undefined = memeriksa, null = gagal
+    const [openKey, setOpenKey] = useState(null);  // satu form edit sekaligus: "kind:KEY"
+    const [tick, setTick] = useState(0);
+    const openRef = useRef(null);
+    const authSeq = useRef(0);
+    openRef.current = openKey;
+
+    const checkAuth = useCallback(async () => {
+      const seq = ++authSeq.current;
+      setAuth(undefined);
+      const r = await cliJson("config auth-check --json");   // butuh jaringan (~1-2 dtk)
+      if (seq === authSeq.current) setAuth(r);
+    }, []);
+
+    const load = useCallback(async () => {
+      const c = await cliJson("config show --json");
+      if (!c) { setFailed(true); return; }
+      setFailed(false);
+      setCfg(c);
+      setOpenKey(null);
+      setTick((t) => t + 1);
+      checkAuth();
+    }, [checkAuth]);
+
+    // Tiap kali tab aktif / layar menyala lagi: muat ulang, kecuali sedang mengisi form (jangan buang ketikan).
+    // Data lama tetap tampil selama menunggu.
+    const reload = () => { if (!openRef.current) load(); };
+    useEffect(() => { if (active) reload(); }, [active]);
+    useWhileVisible(active, reload);
+
+    const rowProps = (kind, k) => ({
+      open: openKey === `${kind}:${k}`,
+      onOpen: () => setOpenKey(`${kind}:${k}`),
+      onClose: () => setOpenKey(null),
+      onChanged: load,
+    });
+
+    let content;
+    if (failed && !cfg) {
+      content = html`<section class="card hero" data-tone="err"><p class="hero-word">Tidak bisa membaca konfigurasi</p>
+        <p class="hero-detail">Buka halaman ini dari KernelSU Manager (module agentbox).</p></section>`;
+    } else if (!cfg) {
+      content = html`<section class="card"><p class="muted">Memuat…</p></section>`;
+    } else {
+      const h = cfg.hermes || {};
+      const authOf = (side) => (auth === undefined ? undefined : auth === null ? null : auth[side]);
+      content = html`
+        ${!h.installed
+          ? html`<section class="card hero" data-tone="todo">
+              <p class="hero-word">Hermes belum terpasang</p>
+              <p class="hero-detail">Pasang Hermes dulu; setelah itu model, kunci, dan gateway bisa diatur di sini.</p>
+              <div class="btn-row"><${TtyLink} profile="hermes-install" primary>Install Hermes di Terminal<//></div>
+            </section>`
+          : html`
+            <${ModelCard} h=${h} />
+            <${HermesKeysCard} h=${h} auth=${authOf("hermes")} claudeLogin=${cfg.claude_login || {}}
+              rowProps=${rowProps} onChanged=${load} />
+            <${ApiCard} a=${h.api_server || {}} active=${active} onChanged=${load} />
+            <${CronCard} tick=${tick} />
+            <${GatewayCard} h=${h} />`}
+        <${ClaudeCard} env=${cfg.env || []} cl=${cfg.claude_login || {}} auth=${authOf("claude")}
+          rowProps=${rowProps} onRecheck=${checkAuth} />`;
+    }
+    return html`<main class="page cfg">
+      <div class="page-head"><h1>Konfigurasi</h1></div>
+      ${content}
+    </main>`;
+  }
+
+  // ---------------------------------------------------------------- halaman: Terminal
+  // Wizard interaktif (profil tetap, tanpa shell bebas) lewat lib/tty.sh: pty di sisi device, input lewat FIFO,
+  // output dibaca dengan polling offset. xterm dan logikanya imperatif: Preact hanya merender <div> kosong,
+  // isinya dipasang createTerminal() sekali lalu tidak pernah disentuh Preact lagi.
+
+  // xterm.js (~300 KB) dimuat saat Terminal pertama kali dibuka, bukan saat SPA dibuka.
+  let xtermLoad = null;
+  function loadXterm() {
+    if (!xtermLoad) {
+      xtermLoad = ["vendor/xterm.js", "vendor/addon-fit.js", "vendor/addon-web-links.js"].reduce((p, src) => p.then(() =>
+        new Promise((resolve, reject) => {
+          const el = document.createElement("script");
+          el.src = src;
+          el.onload = resolve;
+          el.onerror = () => reject(new Error("gagal memuat " + src));
+          document.head.appendChild(el);
+        })), Promise.resolve());
+      xtermLoad.catch(() => { xtermLoad = null; });
+    }
+    return xtermLoad;
+  }
+
+  // Urutan = alur setup. Teks opsi diberi status oleh refreshProfiles() (tty.sh profiles).
+  const TTY_PROFILES = [
+    ["setup", "setup (semua komponen)"],
+    ["hermes-install", "install Hermes"],
+    ["claude-login", "login Claude Code"],
+    ["hermes-setup", "hermes setup"],
+    ["hermes-model", "hermes model"],
+    ["hermes-reinstall", "pasang ulang Hermes"],
+    ["gateway-setup", "gateway setup"],
+    ["hermes-auth", "login Hermes (Anthropic)"],
+    ["demo", "Demo (uji input)"],
+  ];
+  // Markup tetap (tanpa data CLI). Baris tombol di bawah terminal tetap di atas keyboard Android karena saat
+  // input fokus halaman dipendekkan (body.kb-open), sebab WebView KernelSU tidak melaporkan tinggi keyboard.
+  const TTY_MARKUP = `
+    <div class="bar">
+      <select id="tty-profile" aria-label="Perintah">
+        ${TTY_PROFILES.map(([v, l]) => `<option value="${v}" data-label="${l}">${l}</option>`).join("")}
+      </select>
+      <button id="tty-start" class="primary">Mulai</button>
+      <button id="tty-stop" disabled>Hentikan</button>
+    </div>
+    <p class="hint" id="tty-hint"></p>
+    <div class="term" id="tty-term"></div>
+    <div class="keys" id="tty-keys">
+      <button id="tty-kbd" aria-pressed="false" title="Keyboard Android">⌨ mati</button>
+      <button data-k="\\x1b">Esc</button>
+      <button data-k="\\t">Tab</button>
+      <button data-k="\\x03">Ctrl-C</button>
+      <button data-k="\\x1b[A">↑</button>
+      <button data-k="\\x1b[B">↓</button>
+      <button data-k="\\x1b[D">←</button>
+      <button data-k="\\x1b[C">→</button>
+      <button data-k=" ">Spasi</button>
+      <button data-k="\\r">Enter</button>
+      <button id="tty-paste" title="Tempel dari clipboard (mis. kode login)">Tempel</button>
+    </div>
+    <div class="stat" id="tty-stat">siap</div>`;
+
+  // Pasang terminal di root. Mengembalikan { activate(profile), deactivate() }.
+  function createTerminal(root) {
+    const TTY = `sh ${MOD}/lib/tty.sh`;
+    root.innerHTML = TTY_MARKUP;
+    const $ = (id) => root.querySelector("#tty-" + id);
+
+    // ---- base64 <-> byte (UTF-8)
+    const enc = new TextEncoder();
+    function toB64(str) {
+      const bytes = enc.encode(str);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin);
+    }
+    function fromB64(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    // Tempel clipboard ke terminal (mis. kode login OAuth). Baris baru dibuang agar tidak langsung "Enter";
+    // WebView bisa menolak Clipboard API -> arahkan ke tempel lewat keyboard.
+    async function pasteClipboard() {
+      if (!alive) { toast("Mulai sesi dulu"); return; }
+      try {
+        const text = (await navigator.clipboard.readText()).replace(/[\r\n]+/g, "");
+        if (!text) { toast("Clipboard kosong"); return; }
+        queueInput(text);
+        toast("Ditempel — tekan Enter untuk mengirim");
+      } catch (_) {
+        toast("Clipboard tidak bisa dibaca di sini: nyalakan ⌨, lalu tempel dari keyboard");
+      }
+    }
+
+    // ---- terminal. Link (URL biasa dan OSC 8) dibuka di browser bawaan lewat AB.openUrl (hanya http/https).
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: "ui-monospace, 'Roboto Mono', monospace",
+      scrollback: 2000,
+      theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--term").trim() || "#111820" },
+      linkHandler: { activate: (_e, text) => openUrl(text), allowNonHttpProtocols: false },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon((_e, uri) => openUrl(uri)));
+    term.open($("term"));
+
+    const statEl = $("stat");
+    let active = false;                       // tab Terminal sedang tampil
+    let off = 0;
+    let baseH = window.innerHeight;           // tinggi penuh (tanpa keyboard) yang pernah terlihat
+    let kbGuess = false;                      // input sedang fokus -> keyboard kemungkinan terbuka
+    let kbdOn = false;                        // mode keyboard di terminal (tombol ⌨)
+    let alive = false;
+    let polling = false;
+    let lastActivity = 0;
+    let readStats = [];      // waktu round-trip read (ms), 20 terakhir
+    let lastWriteMs = 0;
+    let pending = "";
+    let flushTimer = null;
+    let writing = false;
+
+    function avg(a) { return a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0; }
+    function renderStat(extra) {
+      const state = alive ? "<b>berjalan</b>" : "<span class=dead>berhenti</span>";
+      // vh: diagnostik prototipe (tinggi window / visualViewport / dasar, dan tebakan keyboard)
+      const vv = window.visualViewport;
+      const vh = `vh ${window.innerHeight}/${vv ? Math.round(vv.height) : "-"}/${baseH}${kbGuess ? " kb" : ""}`;
+      statEl.innerHTML = `${state} · ${term.cols}x${term.rows} · read ~${avg(readStats)} ms · write ${lastWriteMs} ms · ${vh}` + (extra ? " · " + esc(extra) : "");
+    }
+    function setRunning(on) {
+      alive = on;
+      $("start").disabled = on;
+      $("stop").disabled = !on;
+      $("profile").disabled = on;
+      renderStat();
+    }
+
+    // ---- polling output: cepat saat aktif, lambat saat diam, berhenti saat tab/halaman tersembunyi.
+    // Output tidak hilang: tty.sh menyimpannya di file, dan pembacaan berikutnya mulai dari offset terakhir.
+    async function pollOnce() {
+      const t0 = performance.now();
+      const r = await run(`${TTY} read ${off}`);
+      readStats.push(Math.round(performance.now() - t0));
+      if (readStats.length > 20) readStats.shift();
+      if (r.errno !== 0) { renderStat("read gagal: " + r.stderr.trim()); return false; }
+      let j;
+      try { j = JSON.parse(r.stdout); } catch (_) { renderStat("JSON tidak valid"); return false; }
+      if (j.off < off) term.reset();           // file output diganti
+      if (j.data) { term.write(fromB64(j.data)); lastActivity = Date.now(); }
+      off = j.off;
+      if (!j.alive && !j.data) {
+        setRunning(false);
+        term.write(`\r\n\x1b[2m[selesai${j.rc === null ? "" : ", kode " + j.rc}]\x1b[0m\r\n`);
+        refreshProfiles();                     // status setup bisa berubah setelah sesi ini
+        return false;
+      }
+      renderStat();
+      return true;
+    }
+    async function pollLoop() {
+      if (polling) return;
+      polling = true;
+      while (alive && active && !document.hidden) {
+        const more = await pollOnce();
+        if (!more) break;
+        const idle = Date.now() - lastActivity > 2000;
+        await new Promise((res) => setTimeout(res, idle ? 700 : 120));
+      }
+      polling = false;
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden || !active) return;
+      if (alive) pollLoop();
+      else refreshProfiles();
+    });
+
+    // ---- input: kumpulkan ketikan ~25 ms, kirim satu panggilan
+    function queueInput(data) {
+      if (!alive) return;
+      pending += data;
+      lastActivity = Date.now();
+      if (!flushTimer) flushTimer = setTimeout(flush, 25);
+    }
+    async function flush() {
+      flushTimer = null;
+      if (writing || !pending) { if (pending && !flushTimer) flushTimer = setTimeout(flush, 25); return; }
+      const data = pending;
+      pending = "";
+      writing = true;
+      const t0 = performance.now();
+      const r = await run(`${TTY} write ${toB64(data)}`);
+      lastWriteMs = Math.round(performance.now() - t0);
+      writing = false;
+      if (r.errno !== 0) renderStat("write gagal: " + r.stderr.trim());
+      if (pending) flush();
+    }
+    term.onData(queueInput);
+
+    // ---- ukuran. Saat tab tersembunyi (display:none) ukurannya 0: jangan diukur, diukur ulang saat aktif.
+    let resizeTimer = null;
+    function onResize() {
+      if (!active) return;
+      fit.fit();
+      renderStat();
+      if (!alive) return;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => run(`${TTY} resize ${term.cols} ${term.rows}`), 200);
+    }
+    window.addEventListener("resize", onResize);
+
+    // ---- keyboard Android
+    // Tinggi halaman = visual viewport, supaya baris tombol selalu tepat di atas keyboard yang terbuka
+    // (WebView tidak selalu mengecilkan layout sendiri).
+    function viewportH() {
+      const vv = window.visualViewport;
+      return vv ? vv.height : window.innerHeight;
+    }
+    function syncViewport() {
+      if (!active) return;
+      const vv = window.visualViewport;
+      const h = viewportH();
+      if (!kbGuess) baseH = Math.max(baseH, window.innerHeight, h);
+      document.documentElement.style.setProperty("--app-h", Math.round(h) + "px");
+      if (vv && vv.offsetTop) window.scrollTo(0, 0);
+      // Fallback hanya bila WebView TIDAK mengecilkan viewport sendiri saat keyboard muncul.
+      const shrunk = h < baseH * 0.85;
+      document.body.classList.toggle("kb-open", kbGuess && !shrunk);
+      onResize();
+    }
+    function setKbGuess(on) {
+      if (kbGuess === on) return;
+      kbGuess = on;
+      // Beri waktu animasi keyboard sebelum mengukur ulang.
+      syncViewport();
+      setTimeout(syncViewport, 350);
+    }
+    function isTypingTarget(el) {
+      return kbdOn && el === term.textarea;
+    }
+    document.addEventListener("focusin", (e) => { if (active) setKbGuess(isTypingTarget(e.target)); });
+    document.addEventListener("focusout", () => setTimeout(() => { if (active) setKbGuess(isTypingTarget(document.activeElement)); }, 50));
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", syncViewport);
+      window.visualViewport.addEventListener("scroll", syncViewport);
+    }
+
+    // Mode keyboard: "mati" = mengetuk terminal tidak memunculkan keyboard (inputmode=none),
+    // cocok untuk navigasi menu lewat baris tombol. Untuk mengetik teks, nyalakan ⌨.
+    function setKeyboard(on) {
+      kbdOn = on;
+      if (term.textarea) term.textarea.setAttribute("inputmode", on ? "text" : "none");
+      const b = $("kbd");
+      b.textContent = on ? "⌨ hidup" : "⌨ mati";
+      b.setAttribute("aria-pressed", String(on));
+      if (on) {
+        // Fokus ulang agar keyboard muncul dengan inputmode baru.
+        term.blur();
+        setTimeout(() => term.focus(), 0);
+      } else if (term.textarea) {
+        term.textarea.blur();
+        setKbGuess(false);
+      }
+    }
+    setKeyboard(false);
+
+    // ---- status tiap profil: sudah / belum / butuh prasyarat (tty.sh profiles)
+    const SETUP_ORDER = ["hermes-install", "claude-login", "hermes-setup", "gateway-setup"];
+    let profState = {};
+    let profLoaded = false;
+    function labelOf(id) {
+      const o = $("profile").querySelector(`option[value="${id}"]`);
+      return o ? o.dataset.label : id;
+    }
+    function nextStep() {
+      for (const id of SETUP_ORDER) if (profState[id] && profState[id].state === "todo") return id;
+      return null;
+    }
+    async function refreshProfiles() {
+      const r = await run(`${TTY} profiles`);
+      let j;
+      try { j = JSON.parse(r.stdout); } catch (_) { return; }   // di luar KernelSU: biarkan apa adanya
+      profState = {};
+      for (const p of j.profiles) profState[p.id] = p;
+      profLoaded = true;
+      const sel = $("profile");
+      for (const o of sel.options) {
+        const p = profState[o.value];
+        if (!p) continue;
+        const mark = { done: " ✓", todo: " • belum", blocked: ` — butuh ${labelOf(p.need)}` }[p.state] || "";
+        o.textContent = o.dataset.label + mark;
+        o.disabled = p.state === "blocked";
+      }
+      if (!alive && sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = nextStep() || "hermes-install";
+      updateHint();
+      applyWanted();
+    }
+
+    // Profil dari tautan halaman lain (#/tty?profile=...): dipilih saja, tidak langsung dimulai. Diterapkan
+    // setelah status profil termuat (opsi yang diblokir tidak dipilih). Tanpa profil: hanya pada pembukaan
+    // pertama, pilih langkah setup berikutnya; setelah itu pilihan user dibiarkan.
+    let wanted;                 // undefined = tidak ada permintaan; null = tanpa profil; string = profil
+    let firstPick = true;
+    function applyWanted() {
+      if (wanted === undefined || !profLoaded) return;
+      const p = wanted;
+      wanted = undefined;
+      if (alive) return;
+      const sel = $("profile");
+      if (!p) {
+        const n = firstPick && nextStep();
+        if (n) { sel.value = n; updateHint(); }
+      } else {
+        const o = sel.querySelector(`option[value="${CSS.escape(p)}"]`);
+        if (o && !o.disabled) { sel.value = p; updateHint(); }
+      }
+      firstPick = false;
+    }
+
+    function updateHint() {
+      const id = $("profile").value;
+      const p = profState[id];
+      const parts = [];
+      if (p) {
+        if (p.state === "done" && id === "hermes-install") parts.push("Hermes sudah terpasang (menjalankan lagi hanya akan dilewati).");
+        else if (p.state === "done") parts.push("Sudah dilakukan" + (p.detail ? ` (${esc(p.detail)})` : "") + ". Jalankan ulang untuk mengubah.");
+        else if (p.state === "todo") parts.push("Belum dilakukan.");
+        else if (p.state === "blocked") parts.push(`Belum bisa: selesaikan "${labelOf(p.need)}" dulu.`);
+        // Penjelasan login selalu ditambahkan (apa pun statusnya): langkahnya tidak jelas tanpa ini.
+        if (id === "claude-login" && p.state !== "blocked") parts.push("Login langganan Claude (Pro/Max/Team): ketuk link yang muncul, setujui di browser, salin kodenya, lalu tekan Tempel → Enter. Hermes bisa ikut memakai login ini (Konfigurasi → Pakai login Claude Code).");
+        else if (id === "hermes-auth" && p.state !== "blocked") parts.push("Login Anthropic khusus Hermes (ketuk link, setujui, tempel kode). Tidak perlu bila Hermes memakai login Claude Code.");
+        else if (id === "setup") parts.push("Menjalankan agentbox setup: menu komponen (rootfs, paket dasar, Claude Code, Hermes, …); yang sudah selesai dilewati.");
+        else if (id === "hermes-reinstall") parts.push("Menjalankan ulang installer Hermes untuk memperbaiki/memperbarui instalasi. Konfigurasi ~/.hermes tidak dihapus; gateway yang sedang berjalan di-restart.");
+      }
+      if (Object.keys(profState).length) {
+        const n = nextStep();
+        if (n && n !== id) parts.push(`Langkah berikutnya: <b>${labelOf(n)}</b>.`);
+        else if (!n) parts.push("Semua langkah setup sudah selesai.");
+      }
+      // Isi dari label tetap; detail dari tty.sh di-escape.
+      $("hint").innerHTML = parts.join(" ");
+      if (!alive) $("start").textContent = p && p.state === "done" ? "Jalankan ulang" : "Mulai";
+    }
+    $("profile").addEventListener("change", updateHint);
+
+    // ---- tombol
+    $("start").addEventListener("click", async () => {
+      fit.fit();
+      term.reset();
+      off = 0;
+      const prof = $("profile").value;
+      const r = await run(`${TTY} start ${prof} ${term.cols} ${term.rows}`);
+      if (r.errno !== 0) { term.write("\x1b[31m" + (r.stderr || "gagal memulai").trim() + "\x1b[0m\r\n"); return; }
+      setRunning(true);
+      lastActivity = Date.now();
+      if (kbdOn) term.focus();
+      pollLoop();
+    });
+    $("stop").addEventListener("click", async () => {
+      await run(`${TTY} stop`);
+      // pollLoop akan menampilkan [selesai] saat membaca status terakhir
+      if (!polling) { await pollOnce(); }
+    });
+    // Tombol layar tidak boleh mengambil fokus: kalau fokus pindah, keyboard Android ikut muncul/hilang.
+    const keys = $("keys");
+    keys.addEventListener("pointerdown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
+    keys.addEventListener("mousedown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
+    keys.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.id === "tty-kbd") { setKeyboard(!kbdOn); return; }
+      if (b.id === "tty-paste") { pasteClipboard(); return; }
+      // data-k memakai escape gaya JS (\x1b, \t, \r)
+      const k = b.dataset.k.replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+        .replace(/\\t/g, "\t").replace(/\\r/g, "\r");
+      queueInput(k);
+    });
+
+    // ---- sambung ulang ke sesi yang masih berjalan (mis. setelah WebUI ditutup)
+    async function reconnect() {
+      const r = await run(`${TTY} status`);
+      try {
+        const j = JSON.parse(r.stdout);
+        if (j.alive) {
+          $("profile").value = j.profile;
+          off = 0;                 // putar ulang seluruh output
+          setRunning(true);
+          run(`${TTY} resize ${term.cols} ${term.rows}`);
+          pollLoop();
+          return;
+        }
+      } catch (_) { /* tanpa KernelSU: biarkan */ }
+      renderStat();
+    }
+
+    let started = false;
+    return {
+      activate(profile) {
+        active = true;
+        wanted = profile || null;
+        // Ukur setelah layout tab ini benar-benar tampil.
+        requestAnimationFrame(() => {
+          if (!active) return;
+          syncViewport();
+          term.refresh(0, term.rows - 1);
+          if (!started) {
+            started = true;
+            reconnect();
+            refreshProfiles();
+          } else if (alive) {
+            pollLoop();
+          } else {
+            refreshProfiles();
+          }
+        });
+      },
+      deactivate() {
+        active = false;
+        // Keyboard Android jangan terbawa ke halaman lain.
+        if (term.textarea && document.activeElement === term.textarea) term.textarea.blur();
+        kbGuess = false;
+        document.body.classList.remove("kb-open");
+      },
+    };
+  }
+
+  function TerminalPage({ active, params }) {
+    const root = useRef(null);
+    const api = useRef(null);
+    const activeRef = useRef(active);
+    activeRef.current = active;
+    const [err, setErr] = useState("");
+
+    // params berganti objek tiap navigasi, jadi tautan #/tty?profile=… yang sama tetap memilih profilnya lagi.
+    useEffect(() => {
+      if (!active) { if (api.current) api.current.deactivate(); return; }
+      (async () => {
+        if (!api.current) {
+          try { await loadXterm(); } catch (e) { setErr(String(e.message || e)); return; }
+          if (api.current) return;
+          setErr("");
+          api.current = createTerminal(root.current);
+        }
+        if (activeRef.current) api.current.activate(params.profile);
+      })();
+    }, [active, params]);
+
+    // <div> xterm selalu anak pertama: Preact tidak pernah mengisi atau mencocokkannya dengan elemen lain.
+    return html`
+      <div class="tty" ref=${root}></div>
+      ${err && html`<section class="card hero" data-tone="err"><p class="hero-word">Terminal gagal dimuat</p>
+        <p class="hero-detail">${err}</p></section>`}`;
+  }
+
+  // ---------------------------------------------------------------- daftar route + App
+
+  const ROUTES = {
+    status: { component: StatusPage },
+    gateway: { component: GatewayPage },
+    tty: { component: TerminalPage },
+    config: { component: ConfigPage },
+  };
+
+  // Terminal memakai layout penuh layar (flex, tanpa scroll, nav ikut alur). Kelas dipasang saat render App
+  // (bukan di efek), supaya sudah berlaku saat efek halaman Terminal mengukur ukuran xterm.
+  function applyRouteLayout(page) {
+    const tty = page === "tty";
+    document.documentElement.classList.toggle("route-tty", tty);
+    document.body.classList.toggle("has-bnav", !tty);
+  }
+
+  function BottomNav({ page }) {
+    // Ikon SVG adalah konstanta di app.js (bukan data CLI), jadi aman disisipkan sebagai HTML.
+    return html`<nav class=${"bnav" + (page === "tty" ? " inline" : "")} aria-label="Navigasi">
+      ${NAV.map((n) => html`<a key=${n.page} href=${link(n.page)} aria-current=${n.page === page ? "page" : undefined}>
+        <span class="ico" dangerouslySetInnerHTML=${{ __html: n.icon }}></span><span>${n.label}</span></a>`)}
+    </nav>`;
+  }
+
+  function App() {
+    const route = useRoute();
+    // Keep-alive: halaman yang pernah dibuka tetap ter-mount; params terakhir disimpan per halaman.
+    const visited = useRef({});
+    visited.current[route.page] = route.params;
+    applyRouteLayout(route.page);
+
+    useEffect(() => {
+      const nav = NAV.find((n) => n.page === route.page);
+      document.title = "agentbox · " + nav.label;
+      window.scrollTo(0, scrolls[route.page] || 0);
+    }, [route.page]);
+
+    return html`
+      ${Object.keys(visited.current).map((id) => {
+        const r = ROUTES[id];
+        const on = id === route.page;
+        const params = visited.current[id];
+        return html`<div key=${id} class=${"view view-" + id} hidden=${!on}>
+          <${r.component} active=${on} params=${params} />
+        </div>`;
+      })}
+      <${BottomNav} page=${route.page} />`;
+  }
+
+  // Placeholder "Memuat…" dibuang dulu: Preact memakai ulang DOM yang ada di container, dan <main> placeholder
+  // tidak cocok dengan elemen mana pun sehingga tertinggal di bawah nav.
+  const appEl = document.getElementById("app");
+  appEl.textContent = "";
+  render(html`<${App} />`, appEl);
 })();
 </script>
 </body>

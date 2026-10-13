@@ -45,11 +45,8 @@ agentbox/
 ├── README.md             # README utama (Inggris); README.id.md versi Indonesia
 ├── LICENSE               # MIT
 └── webroot/              # WebUI KernelSU, navigasi bawah: Status · Gateway · Terminal · Konfigurasi
-    ├── index.html        # Status (halaman pembuka): komponen terpasang/belum, versi, sistem
-    ├── gateway.html      # kontrol gateway (dulu index.html)
-    ├── tty.html          # terminal wizard Hermes (lihat "PROTOTIPE: terminal WebUI")
-    ├── config.html       # ringkasan konfigurasi Hermes + tombol ke wizard di Terminal
-    ├── app.css / app.js  # gaya, ksu.exec, dan navigasi bawah bersama
+    ├── index.html        # SPA Preact: keempat halaman sebagai route hash (lihat "WebUI: struktur halaman")
+    ├── app.css / app.js  # token warna + komponen bersama; ksu.exec, helper, daftar tab (AB.NAV)
     └── vendor/           # lokal, offline: xterm.js + addon (MIT), htm-preact.umd.js (htm Apache-2.0 + Preact MIT)
 ```
 
@@ -253,7 +250,7 @@ sampingnya, file baru tidak langsung terlihat di galeri/aplikasi media sampai me
 
 ## Gateway Hermes (tanpa runit)
 
-`lib/gateway.sh`, `service.sh`, dan `webroot/gateway.html` **sudah dibuat** dan lolos `shellcheck` / `node --check`.
+`lib/gateway.sh`, `service.sh`, dan halaman Gateway WebUI **sudah dibuat** dan lolos `shellcheck` / `node --check`.
 Jangan ditulis ulang tanpa alasan; perbaiki di tempat bila ada bug.
 
 Cara kerja `lib/gateway.sh`:
@@ -270,7 +267,7 @@ Cara kerja `lib/gateway.sh`:
   (TERM, KILL setelah 15 detik). Bila supervisor tidak merespons dalam 25 detik, `stop` mematikan langsung.
 - Log dirotasi copy-truncate saat > 1 MB (`gateway.log.1`, `.2`).
 - `status --json` → `{"state":"running|restarting|stopped","pid":…,"uptime":…,"autostart":…,"installed":…,"configured":…}`.
-  Format ini dipakai WebUI; jangan diubah tanpa mengubah `webroot/gateway.html` dan `webroot/index.html`.
+  Format ini dipakai WebUI (halaman Gateway dan Status di `webroot/index.html`); jangan diubah tanpa mengubah keduanya.
 - "Configured" = `~/.hermes/.env` ada **dan** penanda `state/gateway.done` ada. `.env` saja tidak cukup karena
   installer Hermes selalu membuatnya dari template; penanda ditulis setelah `hermes gateway setup` sukses
   (lewat `agentbox setup gateway` atau `agentbox config gateway`).
@@ -285,42 +282,56 @@ Aturan:
 - Setelah `agentbox config gateway` selesai, jalankan `gateway.sh restart` bila gateway sedang berjalan.
 - `setpriv` berasal dari `util-linux` di rootfs Void; `agentbox doctor` harus mengecek keberadaannya.
 
-### WebUI: halaman Gateway (`webroot/gateway.html`)
+### WebUI: halaman Gateway (`#/gateway`)
 
 - Memanggil `sh /data/adb/modules/agentbox/lib/gateway.sh …` lewat `ksu.exec(cmd, "{}", callbackName)`
   dengan callback `(errno, stdout, stderr)`. Cocokkan dengan dokumentasi WebUI KernelSU versi target.
 - Fitur: status besar (Berjalan / Menunggu restart / Berhenti) dengan uptime dan PID, tombol
   Jalankan/Hentikan dan Mulai ulang, switch "Jalankan saat HP menyala" (autostart), dan tampilan 200 baris log.
-- Status di-poll tiap 3 detik saat halaman terlihat. Bila Hermes belum terpasang atau gateway belum
+- Status di-poll tiap 3 detik selama tab Gateway aktif dan layar menyala. Bila Hermes belum terpasang atau gateway belum
   dikonfigurasi, tombol Jalankan dinonaktifkan dan muncul tautan ke profil Terminal yang sesuai.
 - Tanpa CDN atau dependensi eksternal (WebUI harus jalan offline). Mendukung tema terang/gelap.
 
 ### WebUI: struktur halaman
 
-- Navigasi bawah (Status · Gateway · Terminal · Konfigurasi) dibuat oleh `app.js` dari satu daftar;
-  tiap halaman cukup `body[data-page]` (`data-nav="inline"` di Terminal agar nav ikut alur flex dan
-  disembunyikan saat keyboard terbuka). `app.css` berisi token warna + komponen bersama.
-- **Status** (`index.html`, dibuka pertama oleh KernelSU): `agentbox status --json` (cepat, ~0,4 dtk), lalu
-  `--versions` menyusul (hermes `--version` ~5 dtk). Menampilkan langkah berikutnya + tautan ke Terminal.
-- **Konfigurasi** (`config.html`): `agentbox config show --json`; perubahan dilakukan lewat wizard di Terminal
-  (`tty.html#profile=<id>` memilih profil, tidak langsung memulai), plus form edit kunci sebaris: kunci Hermes
+- **Satu dokumen (SPA)**: `index.html` (dibuka KernelSU) berisi keempat halaman sebagai komponen Preact, routing
+  lewat hash `#/<page>?<params>` (`status`, `gateway`, `tty`, `config`; tak dikenal -> `status`). Pindah tab tidak
+  memuat ulang dokumen; tombol back Android berpindah antar-tab. Daftar tab satu sumber di `AB.NAV` (`app.js`).
+- **Keep-alive**: halaman yang pernah dibuka tetap ter-mount, hanya disembunyikan (`hidden`), jadi state-nya
+  bertahan (data, draft form, sesi xterm). Tiap halaman menerima `active`; polling dan pembaruan saat layar
+  menyala (`useWhileVisible`) **wajib** berhenti saat tidak aktif (tiap tick = `ksu.exec`). Saat tab dibuka lagi,
+  data lama langsung tampil lalu disegarkan di latar. Posisi scroll disimpan per halaman.
+- **CSS per halaman dibatasi** kelas akar (`.gw`, `.cfg`, `.tty`): semua halaman berbagi satu dokumen, jadi aturan
+  global seperti `button {}` akan bocor ke halaman lain.
+- **Jebakan Preact** (pernah terjadi): elemen bersyarat tanpa `key` di antara saudara bertipe sama bisa dicocokkan
+  dengan elemen lain sehingga elemen itu dibuat ulang (switch kehilangan fokus) -> pakai slot tetap + `hidden`.
+  Container `#app` dikosongkan sebelum `render` (placeholder lama tertinggal di bawah nav).
+- **Status** (`#/status`, route default): `agentbox status --json` (cepat, ~0,4 dtk), lalu `--versions` menyusul
+  (hermes `--version` ~5 dtk, sekali per sesi kecuali Muat ulang). Menampilkan langkah berikutnya + tautan ke Terminal.
+- **Konfigurasi** (`#/config`): `agentbox config show --json`; perubahan dilakukan lewat wizard di Terminal
+  (`#/tty?profile=<id>` memilih profil, tidak langsung memulai), plus form edit kunci sebaris: kunci Hermes
   (`config hermes-key`) dan `config/env` Claude Code (`config set/unset`, hapus dengan dua ketukan). Kartu
   "Aplikasi Hermes Android" (`config hermes-api`): aktifkan, tampilkan/salin kunci (diambil hanya saat diminta,
-  disembunyikan lagi setelah 60 dtk), ganti kunci/nonaktifkan dengan dua ketukan, unduh aplikasi (browser bawaan).
-- Halaman lain menautkan ke Terminal dengan `#profile=`; tanpa hash, Terminal memilih langkah setup berikutnya.
-- **Library UI (percontohan di `config.html`)**: Preact + htm lewat bundel resmi `htm/preact/standalone.umd.js`
+  disembunyikan lagi setelah 60 dtk atau saat tab ditinggalkan), ganti kunci/nonaktifkan dengan dua ketukan, unduh
+  aplikasi (browser bawaan). Tidak dimuat ulang saat tab dibuka lagi bila form kunci sedang terbuka.
+- Halaman lain menautkan ke Terminal dengan `#/tty?profile=<id>` (dipilih tiap kali tautan diketuk, kecuali profil
+  diblokir atau sesi berjalan); tanpa profil, Terminal memilih langkah setup berikutnya hanya pada pembukaan pertama.
+- **Library UI**: Preact + htm lewat bundel resmi `htm/preact/standalone.umd.js`
   (htm 3.1.1, ~13 KB, satu file di `vendor/htm-preact.umd.js`, global `window.htmPreact`). Dipilih karena tanpa
   build step, offline, dan Preact meng-escape teks otomatis (tidak ada `innerHTML` dengan data CLI). Dimuat lewat
-  `<script>` UMD biasa, bukan ES module (MIME `type="module"` di WebView KernelSU belum diverifikasi). Halaman lain
-  masih vanilla JS; migrasi berikutnya menunggu hasil percontohan di HP. Library tambahan wajib di-vendor beserta
-  lisensinya; tetap **tanpa CDN** dan **tanpa build step**.
+  `<script>` UMD biasa, bukan ES module (MIME `type="module"` di WebView KernelSU belum diverifikasi). Teruji di HP
+  (2026-10-13). Library tambahan wajib di-vendor beserta lisensinya; tetap **tanpa CDN** dan **tanpa build step**.
 
-### PROTOTIPE: terminal WebUI (`webroot/tty.html` + `lib/tty.sh`)
+### PROTOTIPE: terminal WebUI (`#/tty` + `lib/tty.sh`)
 
 Tujuan: menjalankan wizard interaktif Hermes (`hermes setup`, `hermes model`, `hermes gateway setup`) dari
 WebUI tanpa Termux. Masih prototipe; menyimpang dari aturan "satu file" karena xterm.js 5.5.0 + addon-fit
 (MIT) disimpan lokal di `webroot/vendor/` (tetap offline, tanpa CDN).
 
+- Di SPA, xterm dan logikanya imperatif (`createTerminal`): Preact hanya merender `<div class="tty">` kosong.
+  xterm.js dimuat saat tab Terminal pertama kali dibuka. Saat tab lain aktif, polling output berhenti (output
+  menyusul lewat offset), ukuran tidak diukur, dan `kb-open`/fokus keyboard dilepas. Layout layar penuh (flex, tanpa
+  scroll, nav inline) hanya saat `html.route-tty`.
 - **Tanpa port jaringan** (loopback Android bisa diakses semua aplikasi). `script` (util-linux, di chroot)
   menyediakan pty; di dalamnya `su -l -P agent -c <perintah>`. Input lewat FIFO `run/tty/in`, output ke
   `run/tty/out`; WebUI polling `tty.sh read <offset>` (~120 ms saat aktif, ~700 ms saat diam).
