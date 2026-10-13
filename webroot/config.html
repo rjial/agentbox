@@ -306,8 +306,120 @@
         </div>
         <${Note}>Klien chat <code>rusty4444/hermes-android</code> terhubung ke Gateway API Server Hermes di HP ini
           (hanya 127.0.0.1, wajib API key). Kunci memberi kendali penuh atas Hermes: simpan hanya di aplikasi itu, dan
-          ganti bila bocor. Dashboard (port 9119: Memory, Cron, Skills) sengaja tidak diaktifkan, karena di loopback
-          ia tanpa login dan bisa diambil alih aplikasi lain.<//>
+          ganti bila bocor. Dashboard (port 9119: Memory, Skills) sengaja tidak diaktifkan, karena di loopback
+          ia tanpa login dan bisa diambil alih aplikasi lain. Cron tetap bisa diatur di halaman Konfigurasi
+          tanpa dashboard.<//>
+      </section>`;
+  }
+
+  // ---------------------------------------------------------------- Cron job
+  // Prompt dikirim lewat stdin (base64) seperti nilai rahasia: karakter shell di
+  // prompt tidak boleh pernah masuk argv. Nama & jadwal divalidasi di sisi halaman
+  // juga, tapi CLI yang jadi penentu (cron.sh menolak nama di luar [A-Za-z0-9_-]).
+  const CRON_NAME_RE = /^[A-Za-z0-9_-]{1,40}$/;
+  const CRON_MAX_PROMPT = 8192;
+  const DELIVER_OPTS = [
+    ["local", "local — simpan saja"],
+    ["all", "all — semua channel"],
+    ["origin", "origin — asal dibuat"],
+    ["telegram", "telegram"],
+    ["discord", "discord"],
+    ["signal", "signal"],
+  ];
+
+  function CronCard() {
+    const [data, setData] = useState(undefined);   // undefined = memuat, null = gagal
+    const [name, setName] = useState("");
+    const [sched, setSched] = useState("");
+    const [deliver, setDeliver] = useState("local");
+    const [prompt, setPrompt] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState(null);           // { err, text }
+
+    const load = useCallback(async () => {
+      const d = await cliJson(`config cron list --json`);
+      setData(d && Array.isArray(d.declared) ? d : null);
+    }, []);
+    useEffect(() => { load(); }, [load]);
+
+    const nameBad = name.length > 0 && !CRON_NAME_RE.test(name);
+
+    const add = async () => {
+      if (!CRON_NAME_RE.test(name)) { setMsg({ err: true, text: "Nama tidak valid: hanya A-Z a-z 0-9 _ -, maksimal 40." }); return; }
+      if (!sched.trim()) { setMsg({ err: true, text: "Jadwal belum diisi." }); return; }
+      if (!prompt.trim()) { setMsg({ err: true, text: "Prompt belum diisi." }); return; }
+      if (prompt.length > CRON_MAX_PROMPT) { setMsg({ err: true, text: `Prompt terlalu panjang (${prompt.length}/${CRON_MAX_PROMPT}).` }); return; }
+      setBusy(true); setMsg(null);
+      const arg = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+      const cmd = `printf '%s' '${b64(prompt)}' | ${BB} base64 -d | ${CLI} config cron add ${arg(name)} ${arg(sched)} --deliver ${arg(deliver)} --prompt-stdin`;
+      const r = await run(cmd);
+      setBusy(false);
+      if (r.errno !== 0) { setMsg({ err: true, text: stripAnsi(r.stderr || r.stdout) || "Gagal membuat job." }); return; }
+      setName(""); setSched(""); setPrompt("");
+      setMsg({ err: false, text: "Job dibuat." });
+      load();
+    };
+
+    const remove = async (n) => {
+      setBusy(true); setMsg(null);
+      const arg = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+      const r = await run(`${CLI} config cron remove ${arg(n)}`);
+      setBusy(false);
+      if (r.errno !== 0) { setMsg({ err: true, text: stripAnsi(r.stderr || r.stdout) || "Gagal menghapus." }); return; }
+      setMsg({ err: false, text: "Deklarasi dihapus." });
+      load();
+    };
+
+    const sync = async () => {
+      setBusy(true); setMsg(null);
+      const r = await run(`${CLI} config cron sync`);
+      setBusy(false);
+      setMsg({ err: r.errno !== 0, text: stripAnsi(r.stdout || r.stderr) || "Selesai." });
+      load();
+    };
+
+    return html`
+      <section class="card"><h2>Cron job</h2>
+        ${data === undefined
+          ? html`<p class="muted">Memuat…</p>`
+          : data === null
+            ? html`<${Note}>Tidak bisa membaca daftar cron.<//>`
+            : data.length === 0
+              ? html`<${Note}>Belum ada cron job deklaratif.<//>`
+              : html`<ul class="items">
+                  ${data.map((j) => html`
+                    <li key=${j.name}><div class="txt">
+                      <p class="name">${j.name}</p>
+                      <p class="sub"><code>${j.schedule}</code> → ${j.deliver}</p>
+                    </div>
+                    <${Chip} cls=${j.in_hermes ? "ok" : "todo"}>${j.in_hermes ? "aktif" : "belum"}<//>
+                    <button class="btn" disabled=${busy} onClick=${() => remove(j.name)}>Hapus</button></li>`)}
+                </ul>`}
+        <div class="field"><label class="field-label" for="cron-name">Nama</label>
+          <input class="field-input" id="cron-name" value=${name} placeholder="backup-harian"
+            onInput=${(e) => setName(e.target.value)} /></div>
+        ${nameBad && html`<p class="note err-text">Nama hanya boleh A-Z a-z 0-9 _ - (maks 40).</p>`}
+        <div class="field"><label class="field-label" for="cron-sched">Jadwal</label>
+          <input class="field-input" id="cron-sched" value=${sched} placeholder="0 3 * * *  |  every monday 9am  |  30m"
+            onInput=${(e) => setSched(e.target.value)} /></div>
+        <div class="field"><label class="field-label" for="cron-deliver">Kirim ke</label>
+          <select class="field-input" id="cron-deliver" value=${deliver}
+            onChange=${(e) => setDeliver(e.target.value)}>
+            ${DELIVER_OPTS.map(([v, t]) => html`<option key=${v} value=${v}>${t}</option>`)}
+          </select></div>
+        <div class="field"><label class="field-label" for="cron-prompt">Prompt</label>
+          <textarea class="field-input" id="cron-prompt" rows="3" value=${prompt}
+            placeholder="Instruksi mandiri. Job berjalan di sesi baru, tanpa konteks chat."
+            onInput=${(e) => setPrompt(e.target.value)}></textarea></div>
+        ${msg && html`<p class=${msg.err ? "note err-text" : "note"}>${msg.text}</p>`}
+        <div class="btn-row">
+          <button class="btn primary" disabled=${busy} onClick=${add}>
+            ${busy ? "Memproses…" : "Tambah job"}</button>
+          <button class="btn" disabled=${busy} onClick=${sync}>Terapkan semua</button>
+        </div>
+        <${Note}>Prompt harus mandiri: job berjalan di sesi baru tanpa konteks percakapan ini, dan hasil akhirnya
+          baru dikirim bila <code>--deliver</code> menunjuk channel yang terhubung. Job yang dijadwal ulang tiap boot
+          aman: yang sudah ada tidak diubah, jadi status pause manual tetap.<//>
       </section>`;
   }
 
@@ -421,6 +533,7 @@
           <${HermesKeysCard} h=${h} auth=${authOf("hermes")} claudeLogin=${cfg.claude_login || {}}
             rowProps=${rowProps} onChanged=${load} />
           <${ApiCard} a=${h.api_server || {}} onChanged=${load} />
+          <${CronCard} />
           <${GatewayCard} h=${h} />`}
       <${ClaudeCard} env=${cfg.env || []} cl=${cfg.claude_login || {}} auth=${authOf("claude")}
         rowProps=${rowProps} onRecheck=${checkAuth} />`;

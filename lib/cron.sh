@@ -297,6 +297,7 @@ cmd_cron_add() {
 	ca_deliver=local
 	ca_skills=""
 	ca_paused=""
+	ca_stdin=""
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--deliver)
@@ -308,6 +309,10 @@ cmd_cron_add() {
 			[ -n "${2:-}" ] || die "--skill butuh nilai"
 			ca_skills="$ca_skills${ca_skills:+ }$2"
 			shift 2
+			;;
+		--prompt-stdin)
+			ca_stdin=1
+			shift
 			;;
 		--paused)
 			ca_paused=1
@@ -331,6 +336,17 @@ cmd_cron_add() {
 
 	cron_need_name "$ca_name"
 	[ -n "$ca_sched" ] || die "jadwal tidak boleh kosong"
+
+	# Prompt dari stdin (WebUI): nilai tidak pernah masuk argv, jadi karakter shell
+	# apa pun aman. NUL dibuang (tidak bisa disimpan di file teks) dan panjang
+	# dibatasi 8192 karakter supaya file .cron tetap ringkas.
+	if [ -n "$ca_stdin" ]; then
+		# Baca seluruh stdin dulu (dd bs=N count=1 akan memotong sebelum bisa
+		# diperiksa), buang NUL, baru tolak yang melebihi batas.
+		ca_prompt=$(tr -d '\000' | dd bs=65536 count=8 2>/dev/null)
+		[ "${#ca_prompt}" -le 8192 ] || die "prompt terlalu panjang (maks 8192 karakter)"
+	fi
+
 	[ -n "$ca_prompt" ] || die "prompt tidak boleh kosong"
 	case "$ca_deliver" in
 	"" | local | all | origin | telegram | discord | signal | bot-chat) : ;;
@@ -397,6 +413,9 @@ Opsi:
   --deliver T   tujuan keluaran: local (default, simpan saja), all, origin,
                 telegram, discord, signal, bot-chat, atau platform:chat_id
   --skill S     muat skill sebelum prompt (boleh diulang)
+  --prompt-stdin
+                baca prompt dari stdin, bukan dari argumen (dipakai WebUI supaya
+                karakter shell di prompt tidak pernah masuk argv); maks 8192 karakter
   --paused      simpan deklarasi tanpa langsung membuat job di Hermes
 EOF
 }
