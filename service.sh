@@ -46,4 +46,7 @@ fi
 
 if [ -f "$AB_CONFIG/gateway.autostart" ]; then
 	/system/bin/sh "$MODDIR/lib/gateway.sh" start >/dev/null 2>&1
+	# Terapkan cron job deklaratif (config/cron.d) ke Hermes. Diam-diam: declarative
+	# yang gagal tidak boleh menggagalkan boot. Idempoten, jadi aman tiap boot.
+	[ -d "$AB_CONFIG/cron.d" ] && /system/bin/sh "$MODDIR/lib/cron.sh" sync >/dev/null 2>&1
 fi

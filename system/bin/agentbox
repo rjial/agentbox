@@ -827,6 +827,9 @@ Pemakaian: agentbox config [subperintah]
   hermes                jalankan 'hermes setup' (model/provider) sebagai agent
   gateway               jalankan 'hermes gateway setup' (Telegram dsb.) lalu restart service
   gateway --finish      hanya langkah setelah wizard (rapikan .env, tandai, start/restart); tanpa TTY
+  cron add|list|remove|sync
+                        cron job deklaratif (config/cron.d/*.cron); apply lewat 'hermes cron',
+                        bukan tulis jobs.json, supaya schedule tetap sinkron. Lihat: agentbox config cron --help
 
 Variabel disimpan di $AB_ENV (chmod 600, root) dan diteruskan ke claude/hermes.
 EOF
@@ -939,6 +942,7 @@ cmd_config() {
 		fi
 		config_hermes_key "$2"
 		;;
+	cron) /system/bin/sh "$MODDIR/lib/cron.sh" "${2:-}" "${@:3}" ;;
 	*) die "subperintah config tidak dikenal: $1 (lihat agentbox config --help)" ;;
 	esac
 }
