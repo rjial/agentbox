@@ -63,28 +63,14 @@
     return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
-  // ---- navigasi bawah, dibuat di sini agar markup-nya satu sumber untuk semua halaman.
-  // body[data-page] = tab aktif; body[data-nav="inline"] = nav ikut alur flex (halaman Terminal).
+  // ---- navigasi bawah: daftar tab (route #/<page>), dirender oleh index.html.
   const ICON = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const NAV = [
-    { page: "status", href: "index.html", label: "Status", icon: ICON('<path d="M3 12h4l3-8 4 16 3-8h4"/>') },
-    { page: "gateway", href: "gateway.html", label: "Gateway", icon: ICON('<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>') },
-    { page: "tty", href: "tty.html", label: "Terminal", icon: ICON('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/>') },
-    { page: "config", href: "config.html", label: "Konfigurasi", icon: ICON('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>') },
+    { page: "status", label: "Status", icon: ICON('<path d="M3 12h4l3-8 4 16 3-8h4"/>') },
+    { page: "gateway", label: "Gateway", icon: ICON('<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>') },
+    { page: "tty", label: "Terminal", icon: ICON('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/>') },
+    { page: "config", label: "Konfigurasi", icon: ICON('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>') },
   ];
-  function buildNav() {
-    const body = document.body;
-    const nav = document.createElement("nav");
-    nav.className = "bnav" + (body.dataset.nav === "inline" ? " inline" : "");
-    nav.setAttribute("aria-label", "Navigasi");
-    nav.innerHTML = NAV.map((n) =>
-      `<a href="${n.href}" data-page="${n.page}"${n.page === body.dataset.page ? ' aria-current="page"' : ""}>${n.icon}<span>${n.label}</span></a>`
-    ).join("");
-    body.appendChild(nav);
-    if (body.dataset.nav !== "inline") body.classList.add("has-bnav");
-  }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", buildNav);
-  else buildNav();
 
-  window.AB = { MOD, run, cliJson, toast, esc, openUrl, copyText };
+  window.AB = { MOD, NAV, run, cliJson, toast, esc, openUrl, copyText };
 })();
