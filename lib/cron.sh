@@ -19,7 +19,6 @@
 # Idempoten: sync hanya membuat job yang namanya belum ada di jobs.json. Job yang di-pause
 # manual owner tetap paused.
 
-CRON_SCRIPT=$(cd "${0%/*}" && pwd)/${0##*/}
 MODDIR=$(cd "${0%/*}/.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=common.sh
 . "$MODDIR/lib/common.sh"
@@ -39,9 +38,17 @@ die() {
 	err "$*"
 	exit 1
 }
+# Sama dengan CLI utama: with_timeout mengisi AB_TMO, agent_run membungkus dirinya dengan tmo
+# (busybox timeout tidak bisa menjalankan fungsi shell secara langsung).
 with_timeout() {
-	ct_tmo="$1"
+	AB_TMO=$1
 	shift
+	"$@"
+	wt_rc=$?
+	AB_TMO=""
+	return "$wt_rc"
+}
+tmo() {
 	if [ -n "${AB_TMO:-}" ]; then "$BUSYBOX" timeout "$AB_TMO" "$@"; else "$@"; fi
 }
 
@@ -52,7 +59,7 @@ json_esc() {
 
 # Perintah sebagai agent di chroot (env bersih, tanpa config/env).
 agent_run() {
-	/system/bin/env -i PATH="$AB_PATH_ANDROID" chroot "$ROOTFS" /usr/bin/setpriv \
+	tmo /system/bin/env -i PATH="$AB_PATH_ANDROID" chroot "$ROOTFS" /usr/bin/setpriv \
 		--reuid="$AGENT" --regid="$AGENT" --init-groups /usr/bin/env -i \
 		HOME="$AGENT_HOME" USER="$AGENT" LOGNAME="$AGENT" LANG=en_US.UTF-8 \
 		TERM="${TERM:-xterm-256color}" PATH="$AB_PATH_AGENT" "$@"
@@ -183,14 +190,12 @@ cron_apply_one() {
 	fi
 
 	printf '  BUAT  %-24s %s -> %s\n' "$ca_name" "$ca_sched" "$ca_deliver"
-	ca_args="cron create $(ab_quote "$ca_sched") $(ab_quote "$ca_prompt") --name $(ab_quote "$ca_name") --deliver $(ab_quote "$ca_deliver")"
-	ca_skills=$(cron_field SKILLS "$ca_file")
-	if [ -n "$ca_skills" ]; then
-		for ca_one in $ca_skills; do
-			ca_args="$ca_args --skill $(ab_quote "$ca_one")"
-		done
-	fi
-	ca_out=$(with_timeout 90 agent_run hermes $ca_args 2>&1)
+	# Argumen lewat parameter posisi (bukan string berkutip): prompt bisa berisi spasi dan kutip.
+	set -- cron create "$ca_sched" "$ca_prompt" --name "$ca_name" --deliver "$ca_deliver"
+	for ca_one in $(cron_field SKILLS "$ca_file"); do
+		set -- "$@" --skill "$ca_one"
+	done
+	ca_out=$(with_timeout 90 agent_run hermes "$@" 2>&1)
 	case "$ca_out" in
 	*"Created job:"*)
 		printf '        %s\n' "$(printf '%s' "$ca_out" | sed -n 's/^Created job: //p' | head -n1)"
@@ -358,7 +363,7 @@ cmd_cron_add() {
 		die "job '$ca_name' sudah ada di $cf. Ubah file itu langsung, atau hapus dulu: agentbox config cron remove $ca_name"
 	fi
 
-	cron_write_decl "$ca_name" "$ca_sched" "$ca_prompt" "$ca_deliver" $ca_skills
+	cron_write_decl "$ca_name" "$ca_sched" "$ca_prompt" "$ca_deliver" "$ca_skills"
 	say "Deklarasi tersimpan: $cf"
 
 	if [ "$ca_paused" = 1 ]; then
