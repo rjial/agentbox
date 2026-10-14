@@ -628,7 +628,26 @@
 
   // ---------------------------------------------------------------- kartu
 
-  function ModelCard({ h }) {
+  // `config hermes-link-claude`: Hermes memakai model Claude lewat login Claude Code. Provider lain dialihkan ke
+  // anthropic (config.yaml lama dicadangkan CLI), token Anthropic di .env Hermes dikosongkan.
+  function LinkClaudeButton({ h, onChanged }) {
+    const [busy, setBusy] = useState(false);
+    const anth = h.provider === "anthropic";
+    async function link() {
+      setBusy(true);
+      const r = await run(`${CLI} config hermes-link-claude`);
+      setBusy(false);
+      const out = stripAnsi(r.errno === 0 ? r.stdout : (r.stderr || r.stdout)).trim();
+      toast(out.split("\n").pop() || (r.errno === 0 ? "Selesai" : "Gagal"));
+      onChanged();
+    }
+    return html`<${ConfirmButton} cls="btn primary" disabled=${busy} onConfirm=${link}
+      confirmText=${anth ? "Yakin? Token Anthropic di .env Hermes dikosongkan" : `Yakin? Provider ${h.provider} diganti Anthropic`}>
+      ${busy ? "Memproses… (bisa ~30 detik)" : anth ? "Pakai login Claude Code" : "Pakai Claude (login Claude Code)"}<//>`;
+  }
+
+  function ModelCard({ h, claudeLogin, onChanged }) {
+    const other = h.model_set && h.provider !== "anthropic";
     return html`
       <section class="card"><h2>Model Hermes</h2>
         <ul class="items">
@@ -643,7 +662,11 @@
             ? html`<${TtyLink} profile="hermes-model" primary>Ganti model (hermes model)<//>
                    <${TtyLink} profile="hermes-setup">Setup lengkap (hermes setup)<//>`
             : html`<${TtyLink} profile="hermes-setup" primary>Atur (hermes setup)<//>`}
+          ${(other || !h.model_set) && claudeLogin.logged_in && html`<${LinkClaudeButton} h=${h} onChanged=${onChanged} />`}
         </div>
+        ${(other || !h.model_set) && claudeLogin.logged_in && html`<${Note}>"Pakai Claude" mengalihkan Hermes ke provider
+          anthropic dengan login Claude Code (langganan Pro/Max/Team, diperbarui otomatis). Konfigurasi lama dicadangkan ke
+          <code>~/.hermes/config.yaml.before-claude</code>.<//>`}
       </section>`;
   }
 
@@ -652,16 +675,6 @@
     const secrets = (h.secrets || []).filter((s) => s.key !== "API_SERVER_KEY");
     const has = (k) => secrets.some((s) => s.key === k);
     const anth = h.provider === "anthropic";
-    const [linking, setLinking] = useState(false);
-
-    async function linkClaude() {
-      setLinking(true);
-      const r = await run(`${CLI} config hermes-link-claude`);
-      setLinking(false);
-      const out = stripAnsi(r.errno === 0 ? r.stdout : (r.stderr || r.stdout));
-      toast(out.split("\n").pop() || (r.errno === 0 ? "Selesai" : "Gagal"));
-      onChanged();
-    }
 
     const providerRow = h.provider_key && !h.provider_key_set && html`
       <${KeyRow} kind="hermes" k=${h.provider_key} ...${rowProps("hermes", h.provider_key)}
@@ -687,9 +700,7 @@
             ${claudeLogin.logged_in && !has("ANTHROPIC_API_KEY") && !has("ANTHROPIC_TOKEN") && !has("CLAUDE_CODE_OAUTH_TOKEN")
               ? html`<${Chip} cls="ok">memakai login Claude Code<//>`
               : claudeLogin.logged_in
-              ? html`<${ConfirmButton} cls="btn primary" disabled=${linking} onConfirm=${linkClaude}
-                  confirmText="Yakin? Token Anthropic di .env Hermes dikosongkan">
-                  ${linking ? "Memproses… (bisa ~10 detik)" : "Pakai login Claude Code"}<//>`
+              ? html`<${LinkClaudeButton} h=${h} onChanged=${onChanged} />`
               : html`<${TtyLink} profile="claude-login" primary>Login Claude Code dulu<//>`}
             <${TtyLink} profile="hermes-auth">Login Hermes (Anthropic)<//>
           </div>`}
@@ -948,8 +959,10 @@
               <${TtyLink} profile="claude-login" primary=${!cl.logged_in}>${cl.logged_in ? "Login ulang" : "Login"}<//>`} />
           ${env.map((e) => html`
             <${KeyRow} key=${e.key} kind="claude" k=${e.key} masked=${e.masked} canDelete ...${rowProps("claude", e.key)}
-              sub=${e.key === "ANTHROPIC_API_KEY" && e.kind === "oauth" && html`<span class="err-text">Token OAuth di variabel
-                yang salah: Claude Code menolaknya, dan karena didahulukan, login pun tidak terpakai. Hapus, lalu login.</span>`} />`)}
+              sub=${e.key === "ANTHROPIC_API_KEY" && e.kind === "oauth" ? html`<span class="err-text">Token OAuth di variabel
+                yang salah: Claude Code menolaknya, dan karena didahulukan, login pun tidak terpakai. Hapus, lalu login.</span>`
+                : e.key === "ANTHROPIC_API_KEY" && e.kind === "other" && !has("ANTHROPIC_BASE_URL") && html`<span class="err-text">Bukan
+                API key Anthropic (sk-ant-…): Claude Code menolaknya, dan karena didahulukan, login pun tidak terpakai. Hapus.</span>`} />`)}
           ${!has("ANTHROPIC_API_KEY") && html`
             <${KeyRow} kind="claude" k="ANTHROPIC_API_KEY" canDelete ...${rowProps("claude", "ANTHROPIC_API_KEY")}
               sub="Hanya API key berbayar (sk-ant-api…); tidak perlu bila sudah login." />`}
@@ -1020,7 +1033,7 @@
               <div class="btn-row"><${TtyLink} profile="hermes-install" primary>Install Hermes di Terminal<//></div>
             </section>`
           : html`
-            <${ModelCard} h=${h} />
+            <${ModelCard} h=${h} claudeLogin=${cfg.claude_login || {}} onChanged=${load} />
             <${HermesKeysCard} h=${h} auth=${authOf("hermes")} claudeLogin=${cfg.claude_login || {}}
               rowProps=${rowProps} onChanged=${load} />
             <${ApiCard} a=${h.api_server || {}} active=${active} onChanged=${load} />

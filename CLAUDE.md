@@ -176,11 +176,19 @@ Komponen, dijalankan berurutan sesuai dependensinya:
   `ANTHROPIC_TOKEN` Hermes **dan** di `ANTHROPIC_API_KEY` agentbox):
   - Login langganan (Pro/Max/Team) yang disarankan: `claude auth login --claudeai` sebagai agent (profil Terminal
     `claude-login`) → `~/.claude/.credentials.json` (refresh token, diperbarui otomatis). Lalu
-    `agentbox config hermes-link-claude` mengosongkan `ANTHROPIC_API_KEY`/`ANTHROPIC_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN`
+    `agentbox config hermes-link-claude [--model M]` mengosongkan `ANTHROPIC_API_KEY`/`ANTHROPIC_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN`
     di `.env` Hermes (`hermes config unset`), sehingga Hermes memakai login Claude Code (fallback resminya;
-    sama dengan `use_anthropic_claude_code_credentials`). Cadangan: profil `hermes-auth` (`hermes auth add anthropic`).
+    sama dengan `use_anthropic_claude_code_credentials`). Fallback itu hanya aktif bila `model.provider` =
+    `anthropic`, jadi provider lain dialihkan seperti `hermes model`: `model.provider anthropic`, `model.default`
+    (default `HERMES_CLAUDE_MODEL` = `claude-sonnet-5`, model Claude yang sudah dipakai dipertahankan), dan
+    `model.base_url`/`api_key`/`api_mode` dibuang (base_url lama tetap dipakai provider anthropic, teruji).
+    `config.yaml` lama dicadangkan ke `config.yaml.before-claude`. Cadangan: profil `hermes-auth` (`hermes auth add anthropic`).
   - `anth_guard` menolak token di variabel yang salah: Claude Code `ANTHROPIC_API_KEY` hanya `sk-ant-api…`
     (token OAuth → `CLAUDE_CODE_OAUTH_TOKEN`); Hermes `ANTHROPIC_API_KEY` = API key, `ANTHROPIC_TOKEN` = OAuth.
+    Nilai yang bukan `sk-ant-…` juga ditolak (teruji 2026-10-14: kunci provider lain di `ANTHROPIC_API_KEY`
+    agentbox menimpa login Claude Code → TUI "invalid API key"), kecuali Claude Code `ANTHROPIC_API_KEY` bila
+    `ANTHROPIC_BASE_URL` (proxy) ada di `config/env`. `doctor` menyarankan `config unset` bila variabel env
+    menimpa login yang ada.
   - `agentbox config auth-check [--json]`: sumber yang benar-benar dipakai (Claude Code: `ANTHROPIC_API_KEY` →
     `CLAUDE_CODE_OAUTH_TOKEN` → login; Hermes: `ANTHROPIC_API_KEY` → `ANTHROPIC_TOKEN` → `CLAUDE_CODE_OAUTH_TOKEN`
     → login) lalu dicek ke `GET /v1/models` (gratis, tanpa percakapan; header lewat file 600, bukan argv).

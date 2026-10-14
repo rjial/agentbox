@@ -226,7 +226,7 @@ tty_run() {
 		tty_note "cek kredensial ke Anthropic..."
 		tty_post /system/bin/sh "$MODDIR/system/bin/agentbox" config auth-check
 		[ "$1" = claude-login ] && [ "$tr_rc" = 0 ] &&
-			tty_note "Agar Hermes ikut memakai login ini: Konfigurasi → Pakai login Claude Code."
+			tty_note "Agar Hermes ikut memakai model Claude lewat login ini: Konfigurasi → Pakai Claude (agentbox config hermes-link-claude)."
 	fi
 	if [ "$1" = gateway-setup ]; then
 		if [ "$tr_rc" = 0 ]; then

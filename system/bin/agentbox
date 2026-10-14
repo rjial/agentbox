@@ -817,7 +817,9 @@ Pemakaian: agentbox config [subperintah]
   show --json           JSON (dipakai WebUI): config/env + ringkasan konfigurasi Hermes, semua tersamar
   set KEY --stdin       nilai dibaca dari stdin (dipakai WebUI, tanpa TTY)
   auth-check [--json]   cek kredensial Anthropic Claude Code & Hermes langsung ke API (tanpa percakapan)
-  hermes-link-claude    Hermes memakai login Claude Code (claude auth login; diperbarui otomatis)
+  hermes-link-claude [--model M]
+                        Hermes memakai model Claude lewat login Claude Code (claude auth login); provider
+                        lain dialihkan ke anthropic (default model $HERMES_CLAUDE_MODEL, config lama dicadangkan)
   hermes-api on|rotate|off|show|status [--json]
                         API Server Hermes (127.0.0.1:8642) untuk aplikasi klien (mis. hermes-android)
   hermes-key KEY --stdin  ganti API key/token Hermes lewat 'hermes config set' (hanya kunci provider
@@ -935,7 +937,7 @@ cmd_config() {
 	hermes) config_hermes ;;
 	hermes-api) config_hermes_api "${2:-status}" "${3:-}" ;;
 	auth-check) config_auth_check "${2:-}" ;;
-	hermes-link-claude) config_hermes_link_claude ;;
+	hermes-link-claude) config_hermes_link_claude "${2:-}" "${3:-}" ;;
 	hermes-key)
 		if [ -z "${2:-}" ] || [ "${3:-}" != --stdin ]; then
 			die "pemakaian: agentbox config hermes-key KEY --stdin"
@@ -1131,10 +1133,15 @@ cmd_doctor() {
 	fi
 	# Kredensial dicek langsung ke Anthropic (GET /v1/models); offline -> WARN, bukan FAIL.
 	auth_check_claude
-	dr_auth "Kredensial Claude Code" "Terminal → login Claude Code (claude auth login)"
+	case "$ac_source" in
+	env:*) claude_logged_in && dr_cc_fix="agentbox config unset ${ac_source#env:}  (login Claude Code sudah ada, tertimpa variabel ini)" ;;
+	esac
+	dr_auth "Kredensial Claude Code" "${dr_cc_fix:-Terminal → login Claude Code (claude auth login)}"
 	if hermes_installed && [ "$(ab_hermes_model_key provider)" = anthropic ]; then
 		auth_check_hermes
 		dr_auth "Kredensial Anthropic Hermes" "setelah login Claude Code: agentbox config hermes-link-claude"
+	elif hermes_installed && claude_logged_in; then
+		dr_ok "Hermes memakai provider $(ab_hermes_model_key provider) (model Claude lewat login: agentbox config hermes-link-claude)"
 	fi
 
 	dr_gw=$(gw status --json 2>/dev/null)
@@ -1440,6 +1447,17 @@ anth_guard() {
 	hermes:ANTHROPIC_TOKEN:api)
 		die "API key (sk-ant-api…) untuk Hermes disimpan sebagai ANTHROPIC_API_KEY, bukan ANTHROPIC_TOKEN"
 		;;
+	claude:ANTHROPIC_API_KEY:other)
+		# Proxy kompatibel Anthropic (ANTHROPIC_BASE_URL) boleh memakai kunci format lain.
+		env_get ANTHROPIC_BASE_URL >/dev/null ||
+			die "bukan API key Anthropic (sk-ant-api…). Kunci ini menimpa login Claude Code dan ditolak (401). Langganan Claude: claude auth login; kunci provider lain: atur di Hermes (hermes model)"
+		;;
+	*:CLAUDE_CODE_OAUTH_TOKEN:other | hermes:ANTHROPIC_TOKEN:other)
+		die "bukan token OAuth Anthropic (sk-ant-oat…). Langganan Claude: claude auth login"
+		;;
+	hermes:ANTHROPIC_API_KEY:other)
+		die "bukan API key Anthropic (sk-ant-api…). Langganan Claude: agentbox config hermes-link-claude"
+		;;
 	esac
 }
 
@@ -1582,21 +1600,68 @@ config_auth_check() {
 # `agentbox config hermes-link-claude`: Hermes memakai login Claude Code (diperbarui otomatis) dengan
 # mengosongkan slot token Anthropic di ~/.hermes/.env (sama dengan use_anthropic_claude_code_credentials
 # di Hermes). Gateway yang berjalan di-restart.
+# Model Claude bawaan saat Hermes dialihkan dari provider lain (ada di katalog anthropic Hermes).
+HERMES_CLAUDE_MODEL=claude-sonnet-5
+
+# `agentbox config hermes-link-claude [--model M]`: Hermes memakai model Claude lewat login Claude Code.
+# Provider lain dialihkan ke anthropic seperti `hermes model` (base_url/api_key/api_mode endpoint lama
+# dibuang, karena base_url tetap berlaku dan request akan terkirim ke sana); config.yaml lama dicadangkan.
+# Token Anthropic di .env Hermes dikosongkan agar fallback ke ~/.claude/.credentials.json.
 config_hermes_link_claude() {
+	hl_model=""
+	case "${1:-}" in
+	"") ;;
+	--model) hl_model=${2:-} ;;
+	*) die "pemakaian: agentbox config hermes-link-claude [--model MODEL]" ;;
+	esac
+	case "$hl_model" in
+	*[!A-Za-z0-9._-]*) die "nama model tidak valid: $hl_model" ;;
+	esac
 	need_mount
 	hermes_installed || die "Hermes belum terpasang. Jalankan: agentbox setup hermes"
 	claude_logged_in || die "Claude Code belum login di chroot. Login dulu: Terminal → login Claude Code (claude auth login)"
+	hl_cfg="$AGENT_HOME/.hermes/config.yaml"
+	hl_prov=$(ab_hermes_model_key provider)
+	hl_cur=$(ab_hermes_model_key default)
+	[ -n "$hl_cur" ] || hl_cur=$(ab_hermes_model_key model)
+	if [ -z "$hl_model" ]; then
+		case "$hl_cur" in
+		claude-*) [ "$hl_prov" = anthropic ] && hl_model=$hl_cur ;;
+		esac
+		[ -n "$hl_model" ] || hl_model=$HERMES_CLAUDE_MODEL
+	fi
+	if [ "$hl_prov" != anthropic ] || [ "$hl_model" != "$hl_cur" ]; then
+		if [ "$hl_prov" != anthropic ] && chroot_exists "$hl_cfg"; then
+			root_run cp -p "$hl_cfg" "$hl_cfg.before-claude" || die "gagal mencadangkan config.yaml"
+			say "config.yaml lama dicadangkan: ~/.hermes/config.yaml.before-claude (provider ${hl_prov:-?})"
+		fi
+		with_timeout 120 agent_run hermes config set model.provider anthropic >/dev/null 2>&1 ||
+			die "hermes config set model.provider gagal"
+		with_timeout 120 agent_run hermes config set model.default "$hl_model" >/dev/null 2>&1 ||
+			die "hermes config set model.default gagal"
+		for k in base_url api_key api_mode; do
+			[ -n "$(ab_hermes_model_key "$k")" ] || continue
+			with_timeout 120 agent_run hermes config unset "model.$k" >/dev/null 2>&1 ||
+				die "hermes config unset model.$k gagal"
+		done
+		say "Hermes: provider anthropic, model $hl_model"
+	fi
 	for k in ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
 		[ -n "$(ab_hermes_env_get "$k")" ] || continue
 		with_timeout 60 agent_run hermes config unset "$k" >/dev/null 2>&1 || die "hermes config unset $k gagal"
 		say "$k dikosongkan di ~/.hermes/.env"
 	done
 	root_run chmod 600 "$AGENT_HOME/.hermes/.env"
-	ab_log INFO "config: Hermes memakai login Claude Code"
-	say "Hermes sekarang memakai login Claude Code (~/.claude/.credentials.json, diperbarui otomatis)."
+	ab_log INFO "config: Hermes memakai login Claude Code (provider anthropic)"
+	# Claude Code sendiri: variabel di config/env didahulukan dari login.
+	for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN; do
+		env_get "$k" >/dev/null &&
+			warn "$k di config/env didahulukan dari login Claude Code. Bila 'agentbox config auth-check' menolaknya: agentbox config unset $k"
+	done
 	if gw_running; then
 		gw restart >/dev/null && say "gateway di-restart."
 	fi
+	say "Hermes sekarang memakai login Claude Code (~/.claude/.credentials.json, diperbarui otomatis)."
 }
 
 # `agentbox config hermes-key KEY --stdin`: ganti/isi API key/token Hermes lewat `hermes config set`
