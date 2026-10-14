@@ -1,7 +1,7 @@
 id=agentbox
 name=agentbox
-version=v0.2.0
-versionCode=200
+version=v0.2.1
+versionCode=201
 author=Rizal Abdul Basith <rizalgu4rd14n@gmail.com>
 description=Claude Code + Hermes Agent di chroot Void Linux (aarch64, glibc). Setelah flash: su -c 'agentbox setup'
 updateJson=https://github.com/rjial/agentbox/releases/latest/download/update.json
