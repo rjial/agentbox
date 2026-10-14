@@ -62,8 +62,10 @@ only commands from a fixed list can run (there is no free shell).
 
 ### One Claude subscription sign-in, shared by both
 Have Claude Pro, Max, or Team? Sign in once in Claude Code (`claude auth login`), then a single tap on
-**"Pakai login Claude Code"** ("Use Claude Code login") makes Hermes use the same sign-in, which refreshes
-itself automatically. No more copying tokens that expire or get truncated.
+**"Pakai Claude"** ("Use Claude") on the Configuration page (`agentbox config hermes-link-claude`) makes
+Hermes use Claude models through the same sign-in, which refreshes itself automatically. Another Hermes
+provider is switched to Anthropic (default model `claude-sonnet-5`, the old `config.yaml` is backed up).
+No more copying tokens that expire or get truncated.
 
 `agentbox config auth-check` checks the credentials **actually in use** directly against Anthropic (free,
 no conversation is created) and catches classic mistakes such as an OAuth token stored in an API key

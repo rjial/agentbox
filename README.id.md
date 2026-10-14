@@ -58,8 +58,10 @@ hanya perintah dari daftar tetap yang bisa dijalankan (tidak ada shell bebas).
 
 ### Login langganan Claude, dipakai berdua
 Punya Claude Pro, Max, atau Team? Login sekali di Claude Code (`claude auth login`), lalu satu ketukan
-**"Pakai login Claude Code"** membuat Hermes memakai login yang sama, yang diperbarui otomatis. Tidak
-perlu menyalin token yang bisa kedaluwarsa atau terpotong.
+**"Pakai Claude"** di halaman Konfigurasi (`agentbox config hermes-link-claude`) membuat Hermes memakai model
+Claude lewat login yang sama, yang diperbarui otomatis. Provider Hermes lain dialihkan ke Anthropic (model
+default `claude-sonnet-5`, `config.yaml` lama dicadangkan). Tidak perlu menyalin token yang bisa kedaluwarsa
+atau terpotong.
 
 `agentbox config auth-check` mengecek kredensial yang **benar-benar dipakai** langsung ke Anthropic
 (gratis, tanpa membuat percakapan) dan menangkap kesalahan klasik seperti token OAuth yang tersimpan di
